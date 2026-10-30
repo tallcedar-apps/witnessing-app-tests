@@ -29,11 +29,14 @@ adb shell settings put secure anr_show_background 0 || true
 adb shell cmd connectivity airplane-mode disable || true
 # The emulator's "localhost:$port" now means the runner's local test server.
 adb reverse "tcp:$port" "tcp:$port"
+adb logcat -G 16M || true
 adb logcat -c || true
 # Test setup only: time limits so a dead emulator ("device offline") ends the step instead of hanging the job.
 status=0
 APP_URL="http://localhost:$port/witnessing-app/" OUT="$out" timeout 30m node tests/run-android.js || status=$?
 timeout 60 adb exec-out screencap -p > "$out/last-screen.png" || true
 timeout 60 adb logcat -d -s chromium:V cr_*:V AndroidRuntime:E '*:F' > "$out/logcat.txt" 2>&1 || true
+# Diagnostics only: the whole system log too (app crashes, low-memory kills, activity changes; made-up test data only).
+timeout 60 adb logcat -d -b main,system,crash,events -v time > "$out/logcat-full.txt" 2>&1 || true
 timeout 30 adb reverse --remove-all || true
 exit "$status"

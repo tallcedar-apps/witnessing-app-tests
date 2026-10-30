@@ -18,14 +18,28 @@ async function openRow(page, title){ await rowLoc(page, title).locator('button.o
 async function ask(page, value){ await page.waitForSelector('#modal.show #mf0'); await page.fill('#mf0', value); await page.click('#modal .ok'); await page.waitForSelector('#modal.show', { state: 'hidden' }); await page.waitForTimeout(400); }
 async function editorText(page){ return page.evaluate(() => { const e = document.getElementById('ed'); return e ? e.innerText.trim() : null; }); }
 // Replace one word in the part's text by selecting it and typing over it (like a person would).
-async function replaceWordInEditor(page, oldWord, newWord){
+async function replaceWordInEditor(page, oldWord, newWord, env){
   await page.locator('#ed').click();
-  const ok = await page.evaluate(w => { const ed = document.getElementById('ed'); const tw = document.createTreeWalker(ed, NodeFilter.SHOW_TEXT); let n;
+  // Android Chrome: tapping the box opens the on-screen keyboard, and while it slides in the keyboard resets
+  // the cursor to where the finger tapped. Test setup only: wait until the visible screen area stops changing
+  // size (the keyboard is fully open) before choosing the word, so the selection we make is the one typed over.
+  if (env && env.android) await page.evaluate(() => new Promise(res => { const vv = window.visualViewport; let last = vv ? vv.height : 0, same = 0, n = 0;
+    const t = setInterval(() => { const h = vv ? vv.height : 0; same = (h === last) ? same + 1 : 0; last = h; if (same >= 5 || ++n > 40) { clearInterval(t); res(); } }, 100); }));
+  const select = () => page.evaluate(w => { const ed = document.getElementById('ed'); const tw = document.createTreeWalker(ed, NodeFilter.SHOW_TEXT); let n;
     while ((n = tw.nextNode())){ const i = n.data.indexOf(w); if (i >= 0){ const r = document.createRange(); r.setStart(n, i); r.setEnd(n, i + w.length); const s = getSelection(); s.removeAllRanges(); s.addRange(r); return true; } } return false; }, oldWord);
+  const ok = await select();
   // Test setup only: give Android's keyboard a moment to pick up the new selection before typing.
   await page.waitForTimeout(300);
-  if (ok) await page.keyboard.insertText(newWord);
+  if (ok && env && env.android){
+    // Android: type over the selection with real key presses, the way a person with a keyboard would:
+    // the selected word must still be selected, Backspace deletes it, then the new word is typed key by key.
+    // Key presses go straight to the page, so the on-screen keyboard's own idea of the cursor can't move them.
+    if (await page.evaluate(() => String(getSelection())) !== oldWord) { await select(); await page.waitForTimeout(300); }
+    await page.keyboard.press('Backspace');
+    await page.keyboard.type(newWord, { delay: 50 });
+  } else if (ok) await page.keyboard.insertText(newWord);
   await page.waitForTimeout(300);
+  if (env && env.android) console.log('NOTE [12] part text right after typing: ' + JSON.stringify(await editorText(page)));
   return ok;
 }
 async function appendInEditor(page, text){
@@ -58,7 +72,7 @@ async function runChecklist(env, rec){
   const step = async (label, fn) => { try { await fn(); } catch (e) { rec.check(label, 'step finished without a crash', false, e.message.split('\n')[0]); if (env.mainPage) { await rec.shot(env.mainPage, 'crash-' + label.replace(/\W+/g, '-')); await recover(env.mainPage, env); } } };
 
   // ---------- Step 1: update banner from an older version (on fresh data) ----------
-  await step('1', async () => {
+  const step1 = async () => {
     if (!env.oldFiles){
       // OLD_REF set but not downloadable is a FAILURE, so the update check can never stop running unnoticed.
       if (env.oldRef) rec.check('1', 'the older version (' + env.oldRef + ') was fetched for the update check', false, env.oldError || 'not fetched');
@@ -96,6 +110,18 @@ async function runChecklist(env, rec){
       }
     }
     await done();
+  };
+  // Android emulator only (env.retryClosedPage): if Chrome closes the test's page in the middle of step 1, say so
+  // in the log and run the whole of step 1 once more on a fresh profile. Every check still runs and must pass;
+  // anything already recorded (pass or fail) before the page closed stays in the results.
+  await step('1', async () => {
+    try { await step1(); }
+    catch (e) {
+      if (!env.retryClosedPage || !/has been closed|Target crashed|Page crashed/i.test(e.message)) throw e;
+      rec.note('WARNING [1] the browser page closed in the middle of step 1 (' + e.message.split('\n')[0] + '); running step 1 once more on a fresh profile');
+      if (env.onPageClosedRetry) await env.onPageClosedRetry();
+      await step1();
+    }
   });
 
   if (env.oldFiles) await H.serveOld(env.base, null).catch(() => {}); // always back to the version under test
@@ -273,7 +299,7 @@ async function runChecklist(env, rec){
   await step('12', async () => {
     if (!backup1){ rec.skip('12', 'restore Add', 'no backup file from step 9'); return; }
     await openPartEditor(page, env);
-    const changed = await replaceWordInEditor(page, 'test', 'check'); await tapDone(page); await home(page, env);
+    const changed = await replaceWordInEditor(page, 'test', 'check', env); await tapDone(page); await home(page, env);
     rec.check('12', 'changed one word in the part ("test" to "check")', changed);
     const before = (await H.st(page)).data;
     await H.restoreFile(page, backup1); let t = await H.mtext(page);

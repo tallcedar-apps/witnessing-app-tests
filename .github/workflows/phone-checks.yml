@@ -153,6 +153,8 @@ jobs:
           profile: pixel_6
           force-avd-creation: true
           disable-animations: true
+          ram-size: 4096M      # more memory for the emulator so Chrome isn't short of it
+          heap-size: 576M
           emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none -no-snapshot
           script: bash ci/android-checks.sh
       - name: Fallback — Chrome was missing, so retry on the google_apis_playstore image
@@ -170,6 +172,8 @@ jobs:
           profile: pixel_6
           force-avd-creation: true
           disable-animations: true
+          ram-size: 4096M      # more memory for the emulator so Chrome isn't short of it
+          heap-size: 576M
           emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none -no-snapshot
           script: bash ci/android-checks.sh
       - name: Result of the Android checks
