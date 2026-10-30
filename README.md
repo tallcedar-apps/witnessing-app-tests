@@ -55,14 +55,25 @@ In each browser, the tests start with a brand-new, empty profile and use only ma
 - **The Content-Security-Policy** in the page must match the app's expected policy exactly (it is written out in
   `tests/lib/helpers.js` as `EXPECTED_CSP`). If the app changes its policy on purpose, update that line too.
 - **The update check can't quietly stop.** If the older version (`OLD_REF`) can't be downloaded, step 1 fails.
-- **The first-time tour (version 0.12 and later only)**:
-  - The "New here?" card appears on a fresh first visit.
-  - **No thanks** shows its message and is remembered (the app's own tour setting), so the card doesn't come back after a reload.
-  - **Start the tour** goes through every screen with **Next ›** to **Done**, and the number of screens matches the app's.
-  - With a tour screen open, the phone's Back closes it and counts as skipped.
-  - **No thanks**, **Done**, and Back leave the notes, the backup record, the safety copies, and the save spot unchanged
-    (checked after a reload).
-  - It doesn't appear for someone who updated from 0.10 with notes.
+- **The first-time tour, version 0.12.1 and later** (the current live version; it has no card):
+  - On a brand-new copy the tour opens by itself on the main screen at "Step 1 of N", with focus on its title. There is
+    no "New here?" card, no Start button, and no Take the tour on the main screen.
+  - Every screen shows "Step i of N", **Skip tour**, **‹ Back** (from step 2) and **Next ›**; the last one says **Done**.
+    The screens are welcome, (the home-screen step on a phone browser,) backup, PDF.
+  - **Done** ends it as "finished" with no message and puts focus on the search button.
+  - **Skip tour**, the phone's Back (on step 2) and Escape each end it as "skipped" and say exactly
+    "You can take the tour any time: tap ? Help, then Take the tour."
+  - After any of these, a reload doesn't bring it back by itself.
+  - Help starts with a **🧭 Take the tour** button (at least 44 px tall, on screen) that replays it from step 1; skipping
+    the replay keeps the earlier answer and puts focus back on that button.
+  - Main screen order: search, Back up, your sections, Restore from a backup, PDF and more backup choices, the welcome
+    text, and the version line last. The only line under Back up is "No backup yet.".
+  - Done, Skip and Back leave the notes, the backup record, the safety copies and the save spot unchanged (after a reload).
+  - Someone who updates from 0.10 with notes gets exactly "Updated to version 0.12.1. Your notes are kept. New: a short
+    tour. Tap ? Help, then Take the tour." and the tour never opens by itself, not even after a reload.
+- **The first-time tour, version 0.12 only** (kept so 0.12 can still be tested with `app_ref` = its full commit ID and
+  `expected_version` = `0.12`): the "New here?" card, **No thanks** with its message, **Start the tour** through every
+  screen to **Done**, the phone's Back, unchanged notes, and no tour for someone who updated from 0.10 with notes.
 
   On version 0.11 these checks show as "skipped". The other checks close the tour if it shows up and don't fail if it doesn't.
 
@@ -94,7 +105,8 @@ The tests can't do these, so they still need a check on a real phone:
 - The workflow sets `permissions: contents: read` and nothing else. It can't push, create releases, change GitHub Pages,
   or deploy anything. Every checkout uses `persist-credentials: false`, so the read-only token isn't even left on disk.
 - The two typed-in inputs are checked first. **app_ref** may use only letters, digits, `.`, `_`, `/`, and `-` (up to 100,
-  no `..`); **expected_version** must look like `0.12` or `0.12.1`, or be empty. Anything else stops the run. Inputs reach the
+  no `..`), and a commit must be its full 40-character ID (a shortened one like `c0b3e2f` is refused with a clear message,
+  because the app checkout can't use it; branch and tag names are fine); **expected_version** must look like `0.12` or `0.12.1`, or be empty. Anything else stops the run. Inputs reach the
   scripts only through environment variables.
 - It starts only on a push to this repo, or when you start a run by hand ("Run workflow"). It never runs for other
   people's pull requests. A daily run is in the file but turned off; remove the `#` marks to turn it on.
@@ -119,7 +131,7 @@ $0. GitHub-hosted runners are free for public repos, including macOS. On a priva
    and the **test files** the tests made (backups and forged backups of made-up test data). Nothing in them is personal.
 
 To test a different branch or check a version number, click **Run workflow**. Fill in **app_ref** (for example
-`main`) and, if you like, **expected_version** (for example `0.12`). If the app says a different version, the run fails
+`main`, a tag, or a full 40-character commit ID) and, if you like, **expected_version** (for example `0.12`). If the app says a different version, the run fails
 right away with a clear message.
 
 ## The phone checklist, step by step
@@ -162,7 +174,8 @@ This maps the 17 steps of the phone checklist for version 0.11.
 
 ### The tour checks
 
-The tour selectors and wording are in the `TOUR` block at the top of `tests/lib/tour.js`. They match the 0.12 app: the
+The 0.12.1 checks are in `tour121Checks` in `tests/lib/tour.js` (with the message text in `LATER121`); the app's version
+decides which set runs. The older `TOUR` block at the top of that file matches the 0.12 app: the
 `#tourCard` card ("New here? …", **Start the tour** / **No thanks**), the tour screens in the app's message box
 (`#modal .sheet.tour`: **Skip tour**, **‹ Back**, **Next ›**, **Done**), and the app's own tour setting
 (`window.__wa.tour.state`). If the tour's words or buttons change, update only that block.
@@ -180,7 +193,9 @@ bash ci/negative-checks.sh path/to/app-copy        # e.g. a clone of tallcedar-a
 
 The broken copies: wrong version, Add imports nothing, any file can Replace, only 1 safety copy kept, no offline
 support, Replace skips the safety copy, CSP removed plus an outside image, count/checksum check removed, the
-older version not downloadable, and finishing the tour adds a section (0.12 and later; shown as "n/a" on older versions). Each uses its own local port (8941 and up; never 8765).
+older version not downloadable, finishing the tour adds a section (0.12 and later), and six for the 0.12.1 tour (shown as "n/a" on older versions):
+Escape counts as finished, the tour never opens by itself, Skip shows the old 0.12 message, Help has no Take the tour
+button, the answer isn't saved, and the tour opens by itself for people who update. Each uses its own local port (8941 and up; never 8765).
 
 ## Commits
 

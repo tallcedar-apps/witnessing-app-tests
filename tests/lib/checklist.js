@@ -130,6 +130,14 @@ async function runChecklist(env, rec){
         const tb = await waitTourBox(page, 4000); const ts = await page.evaluate(() => window.__wa.tour);
         rec.check('Tour (0.12+)', 'the tour does not appear for someone who already has notes (updated from ' + env.oldVersion + ')', !tb && ts && ts.state === 'done' && ts.how === 'upgrade' && !ts.card, JSON.stringify(ts));
       }
+      if (H.vge(V, '0.12.1')){
+        // 0.12.1: people who update from 0.11 or older (here: the older version above) get this exact message, and the tour never opens by itself.
+        const msg121 = 'Updated to version ' + V + '. Your notes are kept. New: a short tour. Tap ? Help, then Take the tour.';
+        rec.check('Tour (0.12.1+)', 'updating from ' + env.oldVersion + ' with notes says exactly "' + msg121 + '"', await H.toastSeen(page, new RegExp('^' + msg121.replace(/[.?]/g, '\\$&') + '$'), 3000), await H.toastNow(page));
+        await page.reload(); await page.waitForSelector('#app .row', { timeout: 20000 }).catch(() => {}); await page.waitForTimeout(2500);
+        const ts2 = await page.evaluate(() => window.__wa.tour), open2 = await page.evaluate(() => !!document.querySelector('#modal.show .sheet.tour'));
+        rec.check('Tour (0.12.1+)', '... and after a reload the tour still does not open by itself (state done/upgrade)', !open2 && ts2 && ts2.state === 'done' && ts2.how === 'upgrade', JSON.stringify(ts2));
+      }
     }
     await done();
   };

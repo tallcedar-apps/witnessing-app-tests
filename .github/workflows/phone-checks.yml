@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
     inputs:
       app_ref:
-        description: "App branch, tag, or commit to test (from tallcedar-apps/witnessing-app)"
+        description: "App branch, tag, or full 40-character commit ID to test (from tallcedar-apps/witnessing-app); short commit IDs are refused"
         required: false
         default: main
         type: string
@@ -49,6 +49,8 @@ jobs:
         # Typed-in inputs reach scripts only through env. Reject anything that isn't a plain ref or version number.
         run: |
           [[ "$APP_REF" =~ ^[A-Za-z0-9._/-]{1,100}$ && "$APP_REF" != -* && "$APP_REF" != *..* ]] || { echo "::error::Bad app_ref (letters, digits, . _ / - only, up to 100)"; exit 1; }
+          # A commit must be given in full (40 characters): a short one like c0b3e2f makes the app checkout fail later.
+          if [[ "$APP_REF" =~ ^[0-9a-fA-F]{4,39}$ || "$APP_REF" =~ ^[0-9a-fA-F]{41,}$ ]]; then echo "::error::app_ref '$APP_REF' looks like a shortened commit ID. Use the full 40-character commit ID, or a branch or tag name (like main)."; exit 1; fi
           [[ -z "$EXPECTED_INPUT" || "$EXPECTED_INPUT" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]] || { echo "::error::Bad expected_version (like 0.12 or 0.12.1, or empty)"; exit 1; }
       - name: Get the tests
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -107,6 +109,8 @@ jobs:
         # Typed-in inputs reach scripts only through env. Reject anything that isn't a plain ref or version number.
         run: |
           [[ "$APP_REF" =~ ^[A-Za-z0-9._/-]{1,100}$ && "$APP_REF" != -* && "$APP_REF" != *..* ]] || { echo "::error::Bad app_ref (letters, digits, . _ / - only, up to 100)"; exit 1; }
+          # A commit must be given in full (40 characters): a short one like c0b3e2f makes the app checkout fail later.
+          if [[ "$APP_REF" =~ ^[0-9a-fA-F]{4,39}$ || "$APP_REF" =~ ^[0-9a-fA-F]{41,}$ ]]; then echo "::error::app_ref '$APP_REF' looks like a shortened commit ID. Use the full 40-character commit ID, or a branch or tag name (like main)."; exit 1; fi
           [[ -z "$EXPECTED_INPUT" || "$EXPECTED_INPUT" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]] || { echo "::error::Bad expected_version (like 0.12 or 0.12.1, or empty)"; exit 1; }
       - name: Get the tests
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -260,6 +264,8 @@ jobs:
         # Typed-in inputs reach scripts only through env. Reject anything that isn't a plain ref or version number.
         run: |
           [[ "$APP_REF" =~ ^[A-Za-z0-9._/-]{1,100}$ && "$APP_REF" != -* && "$APP_REF" != *..* ]] || { echo "::error::Bad app_ref (letters, digits, . _ / - only, up to 100)"; exit 1; }
+          # A commit must be given in full (40 characters): a short one like c0b3e2f makes the app checkout fail later.
+          if [[ "$APP_REF" =~ ^[0-9a-fA-F]{4,39}$ || "$APP_REF" =~ ^[0-9a-fA-F]{41,}$ ]]; then echo "::error::app_ref '$APP_REF' looks like a shortened commit ID. Use the full 40-character commit ID, or a branch or tag name (like main)."; exit 1; fi
           [[ -z "$EXPECTED_INPUT" || "$EXPECTED_INPUT" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]] || { echo "::error::Bad expected_version (like 0.12 or 0.12.1, or empty)"; exit 1; }
       - name: Get the tests
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -339,6 +345,8 @@ jobs:
         # Typed-in inputs reach scripts only through env. Reject anything that isn't a plain ref or version number.
         run: |
           [[ "$APP_REF" =~ ^[A-Za-z0-9._/-]{1,100}$ && "$APP_REF" != -* && "$APP_REF" != *..* ]] || { echo "::error::Bad app_ref (letters, digits, . _ / - only, up to 100)"; exit 1; }
+          # A commit must be given in full (40 characters): a short one like c0b3e2f makes the app checkout fail later.
+          if [[ "$APP_REF" =~ ^[0-9a-fA-F]{4,39}$ || "$APP_REF" =~ ^[0-9a-fA-F]{41,}$ ]]; then echo "::error::app_ref '$APP_REF' looks like a shortened commit ID. Use the full 40-character commit ID, or a branch or tag name (like main)."; exit 1; fi
           [[ -z "$EXPECTED_INPUT" || "$EXPECTED_INPUT" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]] || { echo "::error::Bad expected_version (like 0.12 or 0.12.1, or empty)"; exit 1; }
       - name: Get the tests
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -425,6 +433,8 @@ jobs:
         # Typed-in inputs reach scripts only through env. Reject anything that isn't a plain ref or version number.
         run: |
           [[ "$APP_REF" =~ ^[A-Za-z0-9._/-]{1,100}$ && "$APP_REF" != -* && "$APP_REF" != *..* ]] || { echo "::error::Bad app_ref (letters, digits, . _ / - only, up to 100)"; exit 1; }
+          # A commit must be given in full (40 characters): a short one like c0b3e2f makes the app checkout fail later.
+          if [[ "$APP_REF" =~ ^[0-9a-fA-F]{4,39}$ || "$APP_REF" =~ ^[0-9a-fA-F]{41,}$ ]]; then echo "::error::app_ref '$APP_REF' looks like a shortened commit ID. Use the full 40-character commit ID, or a branch or tag name (like main)."; exit 1; fi
           [[ -z "$EXPECTED_INPUT" || "$EXPECTED_INPUT" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]] || { echo "::error::Bad expected_version (like 0.12 or 0.12.1, or empty)"; exit 1; }
       - name: Get the tests
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

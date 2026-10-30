@@ -43,6 +43,34 @@ const CASES = {
       'function setTour(how){ meta.tour = { state:"done", how:how, at:now() }; saveMeta(); if (how === "finished"){ ' +
       'data.sections.push({ id:"tourx"+Date.now(), title:"Tour extra", created:now(), topics:[] }); saveSoon(0); } }'],
   ],
+  // Version 0.12.1 tour (the tour opens by itself once; no card). Older versions report these as "not applicable".
+  // Escape ends the tour as "finished" instead of "skipped" (the app's own negative check J3).
+  'tour-escape-finished': [
+    ['index.html', 'if (e.key === "Escape"){ e.preventDefault(); close("skipped"); }', 'if (e.key === "Escape"){ e.preventDefault(); close("finished"); }'],
+  ],
+  // The tour never opens by itself for a brand-new copy.
+  'tour-no-auto-open': [
+    ['index.html', 'startTour(false, tourResumeKey());', '/* NEGATIVE CHECK: no auto tour */'],
+  ],
+  // Skip shows the old 0.12 wording instead of the 0.12.1 one.
+  'tour-old-later-message': [
+    ['index.html', 'var TOUR_LATER = "You can take the tour any time: tap ? Help, then Take the tour.";',
+      'var TOUR_LATER = "OK. You can take the tour any time: tap Take the tour next to the version number.";'],
+  ],
+  // Help has no Take the tour button.
+  'tour-help-button-missing': [
+    ['index.html', `h += '<button type="button" class="plain tourhelp" id="tourHelp" data-act="tour">🧭 Take the tour</button>';`, ''],
+  ],
+  // The answer (finished/skipped) is not saved, so the app no longer remembers how the tour ended.
+  'tour-answer-not-saved': [
+    ['index.html', 'function setTour(how){ meta.tour = { state:"done", how:how, at:now() }; saveMeta(); }', 'function setTour(how){ meta.tour = { state:"done", how:how, at:now() }; }'],
+  ],
+  // People who update (they already have notes) get the tour opening by itself (all three of the app's guards removed).
+  'tour-opens-for-updaters': [
+    ['index.html', '{ state:"offer" } : { state:"done", how:"upgrade", at:now() }', '{ state:"offer" } : { state:"offer" }'],
+    ['index.html', 'if (hasOwnNotes()){ setTour("ignored"); return false; }', ''],
+    ['index.html', 'meta.tour && meta.tour.state === "offer") setTour("upgrade");', 'false) setTour("upgrade");'],
+  ],
   // Android emulator only (ci/android-checks.sh): the app itself crashes the page. 1.5 s after the version under
   // test opens, it allocates memory without end until Chrome kills the page ("Aw, Snap! Out of memory"). In step 1
   // that happens right after "tap to update". Proves an app-caused crash FAILS and is never retried.
@@ -59,17 +87,20 @@ const CASES = {
 };
 
 const edits = CASES[name];
-const FROM = { 'tour-finish-adds-section': '0.12' };
+const FROM = { 'tour-finish-adds-section': '0.12', 'tour-escape-finished': '0.12.1', 'tour-no-auto-open': '0.12.1', 'tour-old-later-message': '0.12.1',
+  'tour-help-button-missing': '0.12.1', 'tour-answer-not-saved': '0.12.1', 'tour-opens-for-updaters': '0.12.1' };
 if (!edits) {
   console.error('Unknown case: ' + name + '. Known: ' + Object.keys(CASES).join(', '));
   process.exit(64);
 }
 
 if (FROM[name]) {
-  const m = /APP_VERSION = "(\d+)\.(\d+)/.exec(fs.readFileSync(path.join(appDir, 'index.html'), 'utf8'));
-  const [fa, fb] = FROM[name].split('.').map(Number);
-  if (m && (+m[1] < fa || (+m[1] === fa && +m[2] < fb))) {
-    console.log(name + ': not applicable (needs version ' + FROM[name] + ' or newer; this app is ' + m[1] + '.' + m[2] + ')');
+  const m = /APP_VERSION = "(\d+(?:\.\d+)+)/.exec(fs.readFileSync(path.join(appDir, 'index.html'), 'utf8'));
+  const a = m ? m[1].split('.').map(Number) : null, b = FROM[name].split('.').map(Number);
+  let older = false;
+  if (a) for (let i = 0; i < Math.max(a.length, b.length); i++) { const x = a[i] || 0, y = b[i] || 0; if (x !== y) { older = x < y; break; } }
+  if (older) {
+    console.log(name + ': not applicable (needs version ' + FROM[name] + ' or newer; this app is ' + m[1] + ')');
     process.exit(3);
   }
 }

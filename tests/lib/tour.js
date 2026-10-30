@@ -47,7 +47,10 @@ const waitTourBox = async (page, ms) => { const end = Date.now() + (ms || 4000);
 
 // Used after every fresh load by the other checks: if a tour prompt shows, tap its skip button. Never fails.
 async function dismissTourIfShown(page, rec){
-  const b = await waitTourBox(page, 2500);
+  // 0.12.1+: while the app still plans to open the tour by itself (state "offer", not answered yet), wait longer for it
+  // (a slow phone may take a few seconds), so it can't open later on top of another check.
+  const offer = await page.evaluate(() => { const t = window.__wa && window.__wa.tour; return !!t && t.state === 'offer'; }).catch(() => false);
+  const b = await waitTourBox(page, offer ? 15000 : 2500);
   if (!b) return false;
   const skip = b.getByRole('button', { name: TOUR.skip });
   if (await skip.count()){ await skip.first().click(); await page.waitForTimeout(400); if (rec) rec.note('A tour prompt appeared on fresh data and was dismissed with its skip button.'); return true; }
@@ -60,6 +63,8 @@ async function openFresh(env){ const r = await env.fresh({ picker: env.picker })
 async function tourChecks(env, rec, version){
   const S = 'Tour (0.12+)';
   if (!require('./helpers').vge(version, TOUR_FROM)){ rec.skip(S, 'First-visit tour checks', 'app is version ' + version + '; the tour starts in ' + TOUR_FROM); return; }
+  // 0.12.1 and newer: the tour opens by itself (no card); see tour121Checks below.
+  if (require('./helpers').vge(version, TOUR121_FROM)) return tour121Checks(env, rec, version);
   // 1. Appears on a fresh first run; Skip sets the seen flag; it doesn't come back after a reload.
   let { page, done } = await openFresh(env);
   let b = await waitTourBox(page, 15000);
@@ -132,4 +137,108 @@ async function tourChecks(env, rec, version){
   //    where notes are made in the older version first and the app is then updated.
 }
 
-module.exports = { TOUR, TOUR_FROM, tourBox, waitTourBox, dismissTourIfShown, tourChecks };
+// ---------- Version 0.12.1 and newer ----------
+// 0.12.1 (Judge-passed, live; spec: CHANGES.md and docs/TOUR-PLAN.md of 0.12.1) changed the tour: there is no card any more.
+// For a brand-new copy the tour opens by itself, once, on the main screen (#modal .sheet.tour, "Step N of M", Skip tour /
+// ‹ Back / Next › / Done). Skip tour, the phone's Back and Escape end it as "skipped" and show
+// "You can take the tour any time: tap ? Help, then Take the tour."; Done ends it as "finished". It never opens by itself
+// again. Help starts with a "🧭 Take the tour" button (#tourHelp) that replays it. The main screen ends with
+// "PDF and more backup choices", the welcome text and the version line, last. People who update never get it.
+// These checks mirror the app's own tests (v121.js T1-T6, T9, T19, J3, L1-L2).
+const TOUR121_FROM = '0.12.1';
+const LATER121 = 'You can take the tour any time: tap ? Help, then Take the tour.';
+const TOUR_SEL = '#modal.show .sheet.tour';
+const tourOpen = page => page.evaluate(sel => !!document.querySelector(sel), TOUR_SEL);
+const tourState = page => page.evaluate(() => window.__wa && window.__wa.tour);
+const stepInfo = page => page.evaluate(() => { const m = document.querySelector('#modal.show'); if (!m || !m.querySelector('.sheet.tour')) return null; const b = m.querySelector('.tbody');
+  const bk = m.querySelector('[data-tour=back]'), nx = m.querySelector('[data-tour=next]'), sk = m.querySelector('[data-tour=skip]');
+  return { key: b && b.getAttribute('data-step'), ind: ((m.querySelector('#tourStep') || {}).textContent || '').trim(), back: !!bk && !bk.hidden, next: nx ? nx.textContent.trim() : '', skip: !!sk && !sk.hidden && sk.textContent.trim() === 'Skip tour',
+    focus: document.activeElement && document.activeElement.id }; });
+const tapTour = async (page, which) => { await page.locator(TOUR_SEL + ' [data-tour=' + which + ']').click(); await page.waitForTimeout(400); };
+const waitAutoTour = (page, ms) => page.waitForSelector(TOUR_SEL, { timeout: ms || 15000 }).then(() => true, () => false);
+async function noTourAfterReload(page){ await page.reload(); await page.waitForSelector('#app .row, #app .empty', { timeout: 20000 }); await page.waitForTimeout(2500); return !(await tourOpen(page)); }
+async function tour121Checks(env, rec, version){
+  const S = 'Tour (0.12.1+)', H = require('./helpers');
+  // A. A brand-new copy: the tour opens by itself; walk it to Done; it never opens by itself again; Help > Take the tour replays it.
+  let { page, done } = await openFresh(env);
+  let opened = await waitAutoTour(page, 20000), t = await tourState(page), s = await stepInfo(page);
+  rec.check(S, 'a brand-new copy: the tour opens by itself on the main screen at "Step 1 of N" (state "offer", opened by itself)', opened && !!s && /^Step 1 of \d+$/.test(s.ind) && !!t && t.state === 'offer' && t.auto === true && await page.evaluate(() => location.hash === '#/' || location.hash === '' || location.hash === '#'), JSON.stringify(t) + ' ' + (s && s.ind));
+  if (opened) await rec.shot(page, 'tour-auto-step-1');
+  rec.check(S, '... there is no "New here?" card, no Start button, and no Take the tour on the main screen', await page.evaluate(() => !document.getElementById('tourCard') && !document.getElementById('tourLink') && !/New here\?|Take the tour|Start the tour/.test((document.getElementById('app') || {}).textContent || '')) && !(await page.getByRole('button', { name: /^Start the tour$/ }).count()));
+  rec.check(S, '... focus is on the tour title, not a text box (no keyboard pops up)', !!s && s.focus === 'tourTitle');
+  let before = await notesSnap(page);
+  if (opened){
+    const n = t.steps.length, steps = [s];
+    for (let i = 1; i < n + 2; i++){ const cur = steps[steps.length - 1]; if (!cur || cur.next === 'Done') break; await tapTour(page, 'next'); steps.push(await stepInfo(page)); }
+    rec.check(S, 'its screens read "Step 1 of ' + n + '" to "Step ' + n + ' of ' + n + '"; ‹ Back from step 2; Skip tour on every screen; the last button is Done', steps.length === n && steps.every((x, i) => x && x.ind === 'Step ' + (i + 1) + ' of ' + n && x.back === (i > 0) && x.skip && x.next === (i === n - 1 ? 'Done' : 'Next ›')), steps.map(x => x && (x.ind + '/' + x.back + '/' + x.next)).join(' | '));
+    rec.check(S, '... the screens are welcome, (home-screen step on a phone browser,) backup, pdf', steps.length === n && steps[0].key === 'welcome' && steps[n - 2].key === 'backup' && steps[n - 1].key === 'pdf', steps.map(x => x && x.key).join(','));
+    await H.clearToasts(page); await tapTour(page, 'next'); await page.waitForTimeout(500);
+    t = await tourState(page);
+    rec.check(S, 'Done closes it: state done/finished, and no "take the tour" message', !(await tourOpen(page)) && t.state === 'done' && t.how === 'finished' && !(await H.toastSeen(page, /take the tour any time/, 1500)), JSON.stringify(t));
+    rec.check(S, '... focus goes to the search button on the main screen', await page.evaluate(() => !!document.activeElement && document.activeElement.classList.contains('searchbar') && document.activeElement.tagName === 'BUTTON'));
+    rec.check(S, '... after a reload it does not open by itself again', await noTourAfterReload(page) && (await tourState(page)).how === 'finished');
+    rec.check(S, 'finishing the tour leaves notes, backup record and safety copies unchanged', ...(await sameAfterReload(page, before)));
+    await page.goto(env.base + '#/help'); await page.waitForSelector('#tourHelp', { timeout: 15000 }).catch(() => {});
+    const hb = await page.evaluate(() => { const b = document.getElementById('tourHelp'); if (!b) return null; const r = b.getBoundingClientRect(), main = b.closest('main') || b.parentElement;
+      const first = [...main.children].find(e => e.offsetHeight > 0 && !/^H[12]$/.test(e.tagName)); return { tag: b.tagName, text: b.textContent.trim(), h: r.height, top: r.top, bottom: r.bottom, vh: innerHeight, first: first === b }; });
+    rec.check(S, 'Help starts with a "🧭 Take the tour" button, at least 44 px tall, on screen without scrolling', !!hb && hb.tag === 'BUTTON' && hb.text === '🧭 Take the tour' && hb.h >= 44 && hb.top >= 0 && hb.bottom <= hb.vh && hb.first, JSON.stringify(hb));
+    if (hb){
+      await page.locator('#tourHelp').click(); const re = await waitAutoTour(page, 8000); const s1 = await stepInfo(page);
+      rec.check(S, 'Help > Take the tour opens the tour again at step 1', re && !!s1 && s1.ind === 'Step 1 of ' + n, s1 && s1.ind);
+      if (re){ await tapTour(page, 'skip'); await page.waitForTimeout(400); }
+      t = await tourState(page);
+      rec.check(S, '... skipping that replay keeps the earlier answer (done/finished) and focus goes back to Help\'s Take the tour button', re && !(await tourOpen(page)) && t.state === 'done' && t.how === 'finished' && await page.evaluate(() => document.activeElement && document.activeElement.id === 'tourHelp'), JSON.stringify(t));
+    }
+  }
+  await done();
+  // B. Skip tour on the tour that opened by itself; then the new main-screen layout.
+  ({ page, done } = await openFresh(env));
+  opened = await waitAutoTour(page, 20000); before = await notesSnap(page);
+  if (!opened) rec.check(S, 'Skip tour (second brand-new copy): the tour opened by itself', false, JSON.stringify(await tourState(page)));
+  else {
+    await H.clearToasts(page); await tapTour(page, 'skip'); t = await tourState(page);
+    rec.check(S, 'Skip tour: it closes and the state is done/skipped', !(await tourOpen(page)) && t.state === 'done' && t.how === 'skipped', JSON.stringify(t));
+    rec.check(S, '... it says exactly "' + LATER121 + '"', await H.toastSeen(page, new RegExp('^' + LATER121.replace(/[.?]/g, '\\$&') + '$'), 4000), await H.toastNow(page));
+    rec.check(S, '... after a reload it does not open by itself', await noTourAfterReload(page) && (await tourState(page)).how === 'skipped');
+    rec.check(S, 'skipping leaves notes, backup record and safety copies unchanged', ...(await sameAfterReload(page, before)));
+    await page.goto(env.base + '#/'); await page.waitForSelector('#app .row', { timeout: 20000 }); await page.waitForTimeout(500);
+    const order = await page.evaluate(() => { const main = document.querySelector('#app main') || document.getElementById('app'); const all = [...main.querySelectorAll('*')];
+      const ix = el => el ? all.indexOf(el) : -1; const rows = [...main.querySelectorAll('.row')];
+      return { search: ix(main.querySelector('.searchbar')), backup: ix(document.getElementById('bkbtn-home') || document.getElementById('bkbtn-remind')), firstRow: ix(rows[0]), lastRow: ix(rows[rows.length - 1]), restore: ix(document.getElementById('restorePanel')),
+        pdf: ix([...main.querySelectorAll('button,a')].find(b => /PDF and more backup choices/.test(b.textContent))), intro: ix(main.querySelector('.lead.intro')), ver: ix(document.getElementById('ver')),
+        verText: ((document.getElementById('ver') || {}).textContent || '').trim(),
+        verLast: (() => { const v = document.getElementById('ver'); let e = v; if (!e) return false; while (e && e !== main){ if (e.nextElementSibling) return false; e = e.parentElement; } return true; })() }; });
+    rec.check(S, 'main screen order: search, Back up, your sections, Restore from a backup, PDF and more backup choices, the welcome text, then the version line last', order.search >= 0 && order.search < order.backup && order.backup < order.firstRow && order.lastRow < order.restore && order.restore < order.pdf && order.pdf < order.intro && order.intro < order.ver && order.verLast && order.verText === 'Version ' + version, JSON.stringify(order));
+    const bk = await page.evaluate(() => { const b = document.getElementById('bkbtn-home'); if (!b) return null; const r = b.getBoundingClientRect(); return { top: r.top, bottom: r.bottom, vh: innerHeight, info: [...document.querySelectorAll('.bkinfo')].map(e => e.textContent.trim()) }; });
+    rec.check(S, 'the Back up button is at the top, on screen without scrolling, and the only line under it is "No backup yet."', !!bk && bk.top > 0 && bk.bottom <= bk.vh && bk.info.length === 1 && bk.info[0] === 'No backup yet.', JSON.stringify(bk));
+    await rec.shot(page, 'home-layout');
+  }
+  await done();
+  // C. The phone's Back on step 2 of the tour that opened by itself.
+  ({ page, done } = await openFresh(env));
+  opened = await waitAutoTour(page, 20000); before = await notesSnap(page);
+  if (!opened) rec.check(S, 'phone Back (third brand-new copy): the tour opened by itself', false, JSON.stringify(await tourState(page)));
+  else {
+    await tapTour(page, 'next'); const s2 = await stepInfo(page);
+    await H.clearToasts(page); await env.back(page); await page.waitForTimeout(800); t = await tourState(page);
+    rec.check(S, 'phone Back on step 2 closes the whole tour and stays on the main screen; state done/skipped', !!s2 && s2.ind.startsWith('Step 2') && !(await tourOpen(page)) && t.state === 'done' && t.how === 'skipped' && /witnessing-app/.test(page.url()) && await page.evaluate(() => /^(#\/?)?$/.test(location.hash)) && await page.locator('#app .searchbar').isVisible(), JSON.stringify(t) + ' ' + page.url());
+    rec.check(S, '... it says exactly "' + LATER121 + '"', await H.toastSeen(page, new RegExp('^' + LATER121.replace(/[.?]/g, '\\$&') + '$'), 4000), await H.toastNow(page));
+    rec.check(S, '... after a reload it does not open by itself', await noTourAfterReload(page));
+    rec.check(S, 'closing the tour with Back leaves notes, backup record and safety copies unchanged', ...(await sameAfterReload(page, before)));
+  }
+  await done();
+  // D. Escape (keyboard) on the tour that opened by itself.
+  ({ page, done } = await openFresh(env));
+  opened = await waitAutoTour(page, 20000);
+  if (!opened) rec.check(S, 'Escape (fourth brand-new copy): the tour opened by itself', false, JSON.stringify(await tourState(page)));
+  else {
+    await H.clearToasts(page); await page.keyboard.press('Escape'); await page.waitForTimeout(500); t = await tourState(page);
+    rec.check(S, 'Escape closes it as skipped (not finished)', !(await tourOpen(page)) && t.state === 'done' && t.how === 'skipped', JSON.stringify(t));
+    rec.check(S, '... it says exactly "' + LATER121 + '"', await H.toastSeen(page, new RegExp('^' + LATER121.replace(/[.?]/g, '\\$&') + '$'), 4000), await H.toastNow(page));
+    rec.check(S, '... after a reload it does not open by itself', await noTourAfterReload(page));
+  }
+  await done();
+  // E. People who update never get it: checked in step 1 (notes made in the older version, then updated).
+}
+
+module.exports = { TOUR, TOUR_FROM, TOUR121_FROM, LATER121, tourBox, waitTourBox, dismissTourIfShown, tourChecks, tour121Checks, tourOpen, tourState };

@@ -27,7 +27,8 @@ fi
 
 ALL_CASES=(wrong-version add-imports-nothing any-file-can-replace one-safety-copy no-offline
   replace-skips-safety-copy csp-removed-outside-image count-checksum-check-removed old-not-downloadable
-  tour-finish-adds-section)
+  tour-finish-adds-section tour-escape-finished tour-no-auto-open tour-old-later-message tour-help-button-missing
+  tour-answer-not-saved tour-opens-for-updaters)
 if [ "$#" -gt 0 ]; then cases=("$@"); else cases=("${ALL_CASES[@]}"); fi
 
 version=${EXPECTED_VERSION:-$(grep -m1 -oE 'APP_VERSION = "[0-9]+(\.[0-9]+)+' "$app/index.html" | grep -oE '[0-9]+(\.[0-9]+)+$' || true)}

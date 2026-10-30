@@ -35,6 +35,9 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     rec.check(S, 'the app opens in real Mobile Safari and says "Version ' + V + '"', !!ver && ver.trim() === 'Version ' + V, ver);
     await shot('01-safari-main');
     // A tour prompt (0.12+) may cover the screen on fresh data; close it if a skip-style button is showing.
+    // 0.12.1+: the tour opens by itself shortly after the main screen shows, so while the app still plans to open it
+    // (state "offer"), wait for it (up to 8 s) before looking for the skip button.
+    await waitFor("var t=window.__wa&&window.__wa.tour; return (!t || t.state!=='offer' || !!document.querySelector('#modal.show .sheet.tour')) ? 1 : null;", 8000);
     await js("var b=[].slice.call(document.querySelectorAll('button')).find(function(x){return x.offsetParent&&/^(no thanks|skip( the)? tour|skip|not now|maybe later)$/i.test(x.textContent.trim())}); if(b) b.click(); return !!b;");
     const opened = await js("var r=document.querySelector('#app .row button.open'); if(!r) return null; var t=r.textContent; r.click(); return t;");
     const inSection = await waitFor("return /^#\\/s\\//.test(location.hash) ? location.hash : null;", 8000);
