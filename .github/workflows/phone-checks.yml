@@ -1,0 +1,324 @@
+# Phone checks for My Witnessing Notes (https://tallcedar-apps.github.io/witnessing-app/).
+# Lives in the separate PUBLIC repo tallcedar-apps/witnessing-app-tests. Uses only free GitHub-hosted runners.
+# Read-only: it checks out the app's code and tests a copy served on this runner's own localhost.
+# It never pushes, never deploys, never touches GitHub Pages, and uses no secrets.
+name: Phone checks
+
+on:
+  push:
+  workflow_dispatch:
+    inputs:
+      app_ref:
+        description: "App branch, tag, or commit to test (from tallcedar-apps/witnessing-app)"
+        required: false
+        default: main
+        type: string
+      expected_version:
+        description: "Version the app should say, like 0.12 (leave empty to use what the app's index.html says)"
+        required: false
+        default: ""
+        type: string
+  # Optional daily run. To turn it on, remove the # from the next two lines.
+  # schedule:
+  #   - cron: "17 10 * * *"   # every day at 10:17 UTC
+
+permissions:
+  contents: read
+
+concurrency:
+  # One run at a time per branch AND app_ref, so a push doesn't cancel a manual run of a different app_ref.
+  group: phone-checks-${{ github.ref }}-${{ inputs.app_ref || 'main' }}
+  cancel-in-progress: true
+
+env:
+  APP_REPO: tallcedar-apps/witnessing-app
+  APP_REF: ${{ inputs.app_ref || 'main' }}
+  EXPECTED_INPUT: ${{ inputs.expected_version }}
+  APP_PORT: "8931"          # local test server port (never 8765)
+  # Older app version used for the "update" check (checklist step 1): version 0.10, read-only from GitHub.
+  OLD_REF: c0b4cad4d4f93aca04eeef2505a634c5fe35caaa
+  FORCE_COLOR: "0"
+
+jobs:
+  browser-checks:
+    name: Chromium and WebKit at phone size (Linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check the inputs
+        # Typed-in inputs reach scripts only through env. Reject anything that isn't a plain ref or version number.
+        run: |
+          [[ "$APP_REF" =~ ^[A-Za-z0-9._/-]{1,100}$ && "$APP_REF" != -* && "$APP_REF" != *..* ]] || { echo "::error::Bad app_ref (letters, digits, . _ / - only, up to 100)"; exit 1; }
+          [[ -z "$EXPECTED_INPUT" || "$EXPECTED_INPUT" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]] || { echo "::error::Bad expected_version (like 0.12 or 0.12.1, or empty)"; exit 1; }
+      - name: Get the tests
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Get the app (${{ env.APP_REF }})
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ env.APP_REPO }}
+          ref: ${{ env.APP_REF }}
+          path: app
+          persist-credentials: false
+      - name: Check the app version
+        id: ver
+        run: bash ci/app-version.sh app "$EXPECTED_INPUT"
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install Playwright
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium webkit
+      - name: Start the local test server
+        run: bash ci/start-server.sh app "$APP_PORT"
+      - name: Checklist in Chromium (Android size, stand-in file picker)
+        env:
+          ENGINE: chromium
+          EXPECTED_VERSION: ${{ steps.ver.outputs.version }}
+          APP_URL: http://localhost:${{ env.APP_PORT }}/witnessing-app/
+          OUT: results/chromium
+        run: node tests/run-browser.js
+      - name: Checklist in WebKit (iPhone size; WebKit, not real Safari)
+        if: ${{ !cancelled() }}
+        env:
+          ENGINE: webkit
+          EXPECTED_VERSION: ${{ steps.ver.outputs.version }}
+          APP_URL: http://localhost:${{ env.APP_PORT }}/witnessing-app/
+          OUT: results/webkit
+        run: node tests/run-browser.js
+      - name: Save screenshots and test files
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: browser-checks
+          path: results/
+          retention-days: 7
+          if-no-files-found: ignore
+
+  android-emulator:
+    name: Real Chrome in the Android emulator (Linux, KVM)
+    runs-on: ubuntu-latest
+    timeout-minutes: 55  # room for the Play Store fallback after a slow first boot
+    steps:
+      - name: Check the inputs
+        # Typed-in inputs reach scripts only through env. Reject anything that isn't a plain ref or version number.
+        run: |
+          [[ "$APP_REF" =~ ^[A-Za-z0-9._/-]{1,100}$ && "$APP_REF" != -* && "$APP_REF" != *..* ]] || { echo "::error::Bad app_ref (letters, digits, . _ / - only, up to 100)"; exit 1; }
+          [[ -z "$EXPECTED_INPUT" || "$EXPECTED_INPUT" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]] || { echo "::error::Bad expected_version (like 0.12 or 0.12.1, or empty)"; exit 1; }
+      - name: Get the tests
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Get the app (${{ env.APP_REF }})
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ env.APP_REPO }}
+          ref: ${{ env.APP_REF }}
+          path: app
+          persist-credentials: false
+      - name: Check the app version
+        id: ver
+        run: bash ci/app-version.sh app "$EXPECTED_INPUT"
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install Playwright (no browsers needed; it drives the emulator's Chrome)
+        run: npm ci
+      - name: Start the local test server
+        run: bash ci/start-server.sh app "$APP_PORT"
+      - name: Turn on hardware speed-up for the emulator (KVM)
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      # System image: google_apis (API 34, x86_64) is expected to include Chrome. If it doesn't, android-checks.sh
+      # exits 3 and writes results/android-chrome-missing.txt; the next step then retries once on
+      # google_apis_playstore, which always includes Chrome. Any other failure fails the job as usual.
+      - name: Checklist in the Android emulator's Chrome (google_apis image)
+        id: emu
+        continue-on-error: true   # only so the Play Store fallback can run; the "Result" step below fails the job
+        uses: ReactiveCircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2.38.0
+        env:
+          EXPECTED_VERSION: ${{ steps.ver.outputs.version }}
+          ANDROID_IMAGE: google_apis
+          ANDROID_OUT: results/android
+        with:
+          api-level: 34
+          target: google_apis
+          arch: x86_64
+          profile: pixel_6
+          force-avd-creation: true
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none -no-snapshot
+          script: bash ci/android-checks.sh
+      - name: Fallback — Chrome was missing, so retry on the google_apis_playstore image
+        id: emu_playstore
+        if: ${{ !cancelled() && steps.emu.outcome == 'failure' && hashFiles('results/android-chrome-missing.txt') != '' }}
+        uses: ReactiveCircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2.38.0
+        env:
+          EXPECTED_VERSION: ${{ steps.ver.outputs.version }}
+          ANDROID_IMAGE: google_apis_playstore
+          ANDROID_OUT: results/android-playstore
+        with:
+          api-level: 34
+          target: google_apis_playstore
+          arch: x86_64
+          profile: pixel_6
+          force-avd-creation: true
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none -no-snapshot
+          script: bash ci/android-checks.sh
+      - name: Result of the Android checks
+        if: ${{ !cancelled() }}
+        env:
+          EMU: ${{ steps.emu.outcome }}
+          FALLBACK: ${{ steps.emu_playstore.outcome }}
+        run: |
+          if [[ "$EMU" == "success" ]]; then echo "Android checks passed on google_apis."; exit 0; fi
+          if [[ -f results/android-chrome-missing.txt ]]; then
+            echo "::warning::Chrome was missing on google_apis; used google_apis_playstore instead."
+            if [[ "$FALLBACK" == "success" ]]; then echo "Android checks passed on google_apis_playstore."; exit 0; fi
+            echo "::error::Android checks failed on google_apis_playstore ($FALLBACK)."; exit 1
+          fi
+          echo "::error::Android checks failed on google_apis ($EMU)."; exit 1
+      - name: Save screenshots and test files
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: android-emulator
+          path: results/
+          retention-days: 7
+          if-no-files-found: ignore
+
+  iphone-simulator:
+    name: iPhone checks (macOS) — WebKit, plus real Safari in the iOS Simulator
+    runs-on: macos-15
+    timeout-minutes: 25
+    steps:
+      - name: Check the inputs
+        # Typed-in inputs reach scripts only through env. Reject anything that isn't a plain ref or version number.
+        run: |
+          [[ "$APP_REF" =~ ^[A-Za-z0-9._/-]{1,100}$ && "$APP_REF" != -* && "$APP_REF" != *..* ]] || { echo "::error::Bad app_ref (letters, digits, . _ / - only, up to 100)"; exit 1; }
+          [[ -z "$EXPECTED_INPUT" || "$EXPECTED_INPUT" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]] || { echo "::error::Bad expected_version (like 0.12 or 0.12.1, or empty)"; exit 1; }
+      - name: Get the tests
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Get the app (${{ env.APP_REF }})
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ env.APP_REPO }}
+          ref: ${{ env.APP_REF }}
+          path: app
+          persist-credentials: false
+      - name: Check the app version
+        id: ver
+        run: bash ci/app-version.sh app "$EXPECTED_INPUT"
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install Playwright WebKit
+        run: |
+          npm ci
+          npx playwright install webkit
+      - name: Start the local test server
+        run: bash ci/start-server.sh app "$APP_PORT"
+      - name: Start booting an iPhone in the iOS Simulator (it finishes while the WebKit checks run)
+        run: bash ci/ios-simulator.sh boot
+      - name: Checklist in WebKit with iPhone settings (WebKit, not real Safari)
+        env:
+          ENGINE: webkit
+          EXPECTED_VERSION: ${{ steps.ver.outputs.version }}
+          APP_URL: http://localhost:${{ env.APP_PORT }}/witnessing-app/
+          OUT: results/webkit-iphone
+        run: node tests/run-browser.js
+      - name: Open in the iPhone simulator's Safari (screenshots only, not checked)
+        if: ${{ !cancelled() }}
+        run: bash ci/ios-simulator.sh open
+      - name: Experimental, does not affect pass/fail — drive real Mobile Safari with safaridriver
+        id: safari
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        timeout-minutes: 6
+        env:
+          EXPECTED_VERSION: ${{ steps.ver.outputs.version }}
+          APP_URL: http://localhost:${{ env.APP_PORT }}/witnessing-app/
+          OUT: results/ios-safari
+          WD_URL: http://127.0.0.1:4444
+        run: |
+          sudo safaridriver --enable
+          safaridriver -p 4444 > results/safaridriver.log 2>&1 &
+          sleep 3
+          node tests/ios-safari-smoke.js
+      - name: Warn if the experimental Safari check failed
+        if: ${{ always() && steps.safari.outcome == 'failure' }}
+        run: echo "::warning::Experimental real-Safari check failed (does not affect pass/fail). See results/ios-safari and results/safaridriver.log."
+      - name: Shut down the Simulator
+        if: always()
+        run: bash ci/ios-simulator.sh shutdown
+      - name: Save screenshots and test files
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: iphone-simulator
+          path: results/
+          retention-days: 7
+          if-no-files-found: ignore
+
+  live-smoke:
+    name: Live site smoke check (read-only)
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - name: Check the inputs
+        # Typed-in inputs reach scripts only through env. Reject anything that isn't a plain ref or version number.
+        run: |
+          [[ "$APP_REF" =~ ^[A-Za-z0-9._/-]{1,100}$ && "$APP_REF" != -* && "$APP_REF" != *..* ]] || { echo "::error::Bad app_ref (letters, digits, . _ / - only, up to 100)"; exit 1; }
+          [[ -z "$EXPECTED_INPUT" || "$EXPECTED_INPUT" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]] || { echo "::error::Bad expected_version (like 0.12 or 0.12.1, or empty)"; exit 1; }
+      - name: Get the tests
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Get the app's main branch (to learn which version should be live)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ env.APP_REPO }}
+          ref: main
+          path: app
+          persist-credentials: false
+      - name: Check the version on main
+        id: ver
+        # The typed-in expected version only applies here when the run is testing main.
+        run: |
+          if [[ "$APP_REF" == "main" ]]; then
+            bash ci/app-version.sh app "$EXPECTED_INPUT"
+          else
+            bash ci/app-version.sh app
+          fi
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install Playwright
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium webkit
+      - name: Open the live site (Chromium and WebKit), check the version, reopen offline
+        env:
+          EXPECTED_VERSION: ${{ steps.ver.outputs.version }}
+          LIVE_URL: https://tallcedar-apps.github.io/witnessing-app/
+          OUT: results/live-smoke
+        run: node tests/live-smoke.js
+      - name: Save screenshots
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: live-smoke
+          path: results/
+          retention-days: 7
+          if-no-files-found: ignore
