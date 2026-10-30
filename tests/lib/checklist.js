@@ -22,6 +22,8 @@ async function replaceWordInEditor(page, oldWord, newWord){
   await page.locator('#ed').click();
   const ok = await page.evaluate(w => { const ed = document.getElementById('ed'); const tw = document.createTreeWalker(ed, NodeFilter.SHOW_TEXT); let n;
     while ((n = tw.nextNode())){ const i = n.data.indexOf(w); if (i >= 0){ const r = document.createRange(); r.setStart(n, i); r.setEnd(n, i + w.length); const s = getSelection(); s.removeAllRanges(); s.addRange(r); return true; } } return false; }, oldWord);
+  // Test setup only: give Android's keyboard a moment to pick up the new selection before typing.
+  await page.waitForTimeout(300);
   if (ok) await page.keyboard.insertText(newWord);
   await page.waitForTimeout(300);
   return ok;
@@ -29,6 +31,7 @@ async function replaceWordInEditor(page, oldWord, newWord){
 async function appendInEditor(page, text){
   await page.locator('#ed').click();
   await page.evaluate(() => { const ed = document.getElementById('ed'); const r = document.createRange(); r.selectNodeContents(ed); r.collapse(false); const s = getSelection(); s.removeAllRanges(); s.addRange(r); });
+  await page.waitForTimeout(300);
   await page.keyboard.insertText(text); await page.waitForTimeout(300);
 }
 const tapDone = async page => { await page.locator('header .tbtn[data-act="back"]').first().click(); await page.waitForTimeout(500); };
