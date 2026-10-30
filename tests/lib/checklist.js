@@ -111,20 +111,30 @@ async function runChecklist(env, rec){
     }
     await done();
   };
-  // Android emulator only (env.retryClosedPage): if Chrome closes the test's page in the middle of step 1, say so
-  // in the log and run the whole of step 1 once more on a fresh profile. Every check still runs and must pass;
-  // anything already recorded (pass or fail) before the page closed stays in the results.
+  // Android emulator only (env.retryClosedPage): if the page "has been closed" in the middle of step 1 AND the
+  // emulator's system log shows Android itself shut Chrome down since step 1 began (proven cause: Google Play
+  // services restarting after boot, see ANDROID-FIXES.md), record a counted WARNING, mark the first try's rows
+  // "(try 1)", wait for the emulator to settle, and run all of step 1 once more on a fresh profile. Every check
+  // still runs and must pass; checks already recorded (pass or fail) stay in the results. A page or renderer
+  // crash, a close without that system evidence, or a second close is a FAIL as before.
   await step('1', async () => {
+    const i0 = rec.results.length;
+    if (env.markStep1Start) await env.markStep1Start();
     try { await step1(); }
     catch (e) {
-      if (!env.retryClosedPage || !/has been closed|Target crashed|Page crashed/i.test(e.message)) throw e;
-      rec.note('WARNING [1] the browser page closed in the middle of step 1 (' + e.message.split('\n')[0] + '); running step 1 once more on a fresh profile');
+      if (!env.retryClosedPage || !/has been closed/i.test(e.message)) throw e;
+      const killed = env.closedBySystem ? await env.closedBySystem() : '';
+      if (!killed){ rec.note('[1] the page closed, but the system log shows no system shutdown of Chrome since step 1 began, so step 1 is NOT retried'); throw e; }
+      rec.tagRows(i0, ' (try 1)');
+      rec.warn('1', 'Android shut Chrome down during step 1 (not the app); step 1 was run again on a fresh profile', 'error: ' + e.message.split('\n')[0] + ' | system log: ' + killed);
       if (env.onPageClosedRetry) await env.onPageClosedRetry();
       await step1();
     }
   });
 
   if (env.oldFiles) await H.serveOld(env.base, null).catch(() => {}); // always back to the version under test
+  // Negative check only (tests/neg-android-crash): stop after step 1. Never set in a normal run.
+  if (env.stopAfterStep1) { rec.note('stopping after step 1 (negative check only)'); return; }
 
   // ---------- Main flow: one fresh, empty profile ----------
   const { page, done } = await env.fresh({ picker: env.picker });

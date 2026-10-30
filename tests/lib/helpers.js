@@ -22,6 +22,13 @@ function makeRecorder(label, outDir){
       results.push(r); console.log((ok ? 'PASS ' : 'FAIL ') + '[' + step + '] ' + name + (r.detail && !ok ? '  (' + r.detail + ')' : ''));
       return ok;
     },
+    // A counted warning: something went wrong in the test setup and was handled (e.g. a retried step). Shown in
+    // the headline and the table, and turned into a GitHub ::warning:: by the CI script. It never hides a FAIL.
+    warn(step, name, detail){ const r = { step, name, status: 'WARN', detail: String(detail || '').replace(/\s+/g, ' ').slice(0, 600) };
+      results.push(r); console.log('WARN [' + step + '] ' + name + (r.detail ? '  (' + r.detail + ')' : '')); },
+    // Mark rows recorded since index i as belonging to a first try (e.g. " (try 1)"), so a retried step's rows are clear.
+    tagRows(i, suffix){ for (let k = i; k < results.length; k++) if (results[k].status !== 'WARN') results[k].name += suffix; },
+    get warnings(){ return results.filter(r => r.status === 'WARN').length; },
     skip(step, name, why){ results.push({ step, name, status: 'SKIP', detail: why }); console.log('SKIP [' + step + '] ' + name + '  (' + why + ')'); },
     note(t){ notes.push(t); console.log('NOTE ' + t); },
     async shot(page, name){
@@ -32,15 +39,16 @@ function makeRecorder(label, outDir){
     finish(){
       const pass = results.filter(r => r.status === 'PASS').length, skip = results.filter(r => r.status === 'SKIP').length;
       const esc = s => String(s).replace(/\|/g, '\\|');
-      let md = '### ' + label + '\n\n' + (rec.failed ? '❌ ' : '✅ ') + pass + ' passed, ' + rec.failed + ' failed, ' + skip + ' skipped\n\n';
+      const warnN = rec.warnings, warnTxt = warnN ? ', ⚠️ ' + warnN + ' warning' + (warnN === 1 ? '' : 's') : '';
+      let md = '### ' + label + '\n\n' + (rec.failed ? '❌ ' : '✅ ') + pass + ' passed, ' + rec.failed + ' failed, ' + skip + ' skipped' + warnTxt + '\n\n';
       md += '| Result | Checklist step | Check | Details |\n|---|---|---|---|\n';
-      for (const r of results) md += '| ' + (r.status === 'PASS' ? '✅ PASS' : r.status === 'FAIL' ? '❌ FAIL' : '⏭️ SKIP') + ' | ' + esc(r.step) + ' | ' + esc(r.name) + ' | ' + esc(r.status === 'PASS' ? '' : r.detail) + ' |\n';
+      for (const r of results) md += '| ' + (r.status === 'PASS' ? '✅ PASS' : r.status === 'FAIL' ? '❌ FAIL' : r.status === 'WARN' ? '⚠️ WARNING' : '⏭️ SKIP') + ' | ' + esc(r.step) + ' | ' + esc(r.name) + ' | ' + esc(r.status === 'PASS' ? '' : r.detail) + ' |\n';
       if (notes.length) md += '\nNotes:\n' + notes.map(n => '- ' + n).join('\n') + '\n';
       md += '\n';
-      fs.writeFileSync(path.join(outDir, 'results.json'), JSON.stringify({ label, results, notes }, null, 1));
+      fs.writeFileSync(path.join(outDir, 'results.json'), JSON.stringify({ label, passed: pass, failed: rec.failed, skipped: skip, warnings: warnN, results, notes }, null, 1));
       fs.writeFileSync(path.join(outDir, 'summary.md'), md);
       if (process.env.GITHUB_STEP_SUMMARY) fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, md);
-      console.log('Total: ' + pass + ' passed, ' + rec.failed + ' failed, ' + skip + ' skipped');
+      console.log('Total: ' + pass + ' passed, ' + rec.failed + ' failed, ' + skip + ' skipped' + (warnN ? ', ' + warnN + ' warning' + (warnN === 1 ? '' : 's') : ''));
       return rec.failed ? 1 : 0;
     }
   };

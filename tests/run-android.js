@@ -27,7 +27,22 @@ const reverseOff = () => { try { adb('reverse', '--remove', 'tcp:' + PORT); } ca
   if (!device) { rec.check('setup', 'an Android emulator is connected', false, 'adb lists no device'); process.exit(rec.finish()); }
   rec.note('Device: ' + device.model() + ' (serial ' + device.serial() + ')');
   try { rec.note('Chrome: ' + (await device.shell('dumpsys package ' + CHROME + ' | grep -m1 versionName')).toString().trim()); } catch (e) { /* informational only */ }
-  let ctx = null, devShots = 0, logcats = 0, closingCtx = false;
+  let ctx = null, devShots = 0, logcats = 0, closingCtx = false, freshN = 0;
+  const withLimit = (p, ms, what) => { let t; return Promise.race([p, new Promise((_, rej) => { t = setTimeout(() => rej(new Error(what + ' took longer than ' + (ms / 1000) + ' s')), ms); })]).finally(() => clearTimeout(t)); };
+  // Test setup only: wait for Google Play services to finish restarting (see ci/android-settle.sh).
+  const settle = label => { try { const o = execFileSync('bash', ['ci/android-settle.sh', label], { encoding: 'utf8', timeout: 300000 }); process.stdout.write(o);
+      const line = o.split('\n').find(l => l.startsWith('SETTLE WAIT')); if (line) rec.note(line); if (/::warning::/.test(o)) rec.note('settle wait gave up: ' + label); }
+    catch (e) { rec.note('settle wait failed (' + label + '): ' + e.message.split('\n')[0]); } };
+  let step1Epoch = 0;
+  const deviceEpoch = async () => parseFloat((await device.shell('date +%s')).toString().trim()) || 0;
+  // Did Android itself shut Chrome down (proven cause: a dying Play services process whose helper Chrome uses)
+  // since step 1 began? Returns the matching system-log line, or '' if not. Renderer ("sandboxed_process") deaths
+  // and anything else don't count, so an app-caused crash is never retried.
+  const closedBySystem = () => { try {
+      const log = execFileSync('adb', ['logcat', '-d', '-b', 'events', '-v', 'epoch'], { encoding: 'utf8', timeout: 60000, maxBuffer: 64 * 1024 * 1024 });
+      const hit = log.split('\n').find(l => /\bam_kill\s*:\s*\[\d+,\d+,com\.android\.chrome,-?\d+,depends on provider .* in dying proc /.test(l) && parseFloat(l.trim()) >= step1Epoch - 1);
+      return hit ? hit.trim().replace(/\s+/g, ' ').slice(0, 300) : '';
+    } catch (e) { console.log('system log read failed: ' + e.message); return ''; } };
   // Diagnostics only: a copy of the emulator's full system log (made-up test data only) at the moment something went wrong.
   const saveLogcat = name => { try { fs.mkdirSync(path.join(OUT, 'device'), { recursive: true });
     fs.writeFileSync(path.join(OUT, 'device', 'logcat-' + String(++logcats).padStart(2, '0') + '-' + name + '.txt'), execFileSync('adb', ['logcat', '-d', '-b', 'main,system,crash,events', '-v', 'time'], { encoding: 'utf8', timeout: 60000, maxBuffer: 64 * 1024 * 1024 })); }
@@ -40,11 +55,15 @@ const reverseOff = () => { try { adb('reverse', '--remove', 'tcp:' + PORT); } ca
     async fresh({ picker } = {}){
       if (ctx) { closingCtx = true; await ctx.close().catch(() => {}); closingCtx = false; ctx = null; }
       // A fresh, empty Chrome profile: wipes only the emulator's Chrome data (made-up test data only).
-      await device.shell('pm clear ' + CHROME);
+      // Test setup only: 120 s limits on "pm clear" and starting Chrome, and how long each took goes in the log.
+      const tf = Date.now(); freshN++;
+      await withLimit(device.shell('pm clear ' + CHROME), 120000, 'pm clear (fresh profile ' + freshN + ')');
+      const tClear = Date.now() - tf;
       // Emulator setup only: allow Chrome's notifications up front so Chrome's own "Chrome notifications make
       // things easier" sheet doesn't cover the page and swallow the Back key. (The app never uses notifications.)
       await device.shell('pm grant ' + CHROME + ' android.permission.POST_NOTIFICATIONS').catch(() => {});
-      ctx = await device.launchBrowser({ pkg: CHROME });
+      ctx = await withLimit(device.launchBrowser({ pkg: CHROME }), 120000, 'starting Chrome (fresh profile ' + freshN + ')');
+      console.log('NOTE fresh profile ' + freshN + ' ready in ' + ((Date.now() - tf) / 1000).toFixed(1) + ' s (pm clear ' + (tClear / 1000).toFixed(1) + ' s)');
       await H.watchRequests(ctx, env.outside, env.allowedHosts);   // any request to another site fails the run
       await ctx.addInitScript(H.TOAST_LOG); await ctx.addInitScript(H.SHARE_MOCK); await ctx.addInitScript(H.PRINT_STUB);
       await ctx.addInitScript(picker ? H.PICKER_MOCK : H.NO_PICKER);
@@ -59,7 +78,10 @@ const reverseOff = () => { try { adb('reverse', '--remove', 'tcp:' + PORT); } ca
       return { page, ctx, done: async () => { finished = true; await devShot('profile-end'); await mine.close().catch(() => {}); if (ctx === mine) ctx = null; } };
     },
     android: true, retryClosedPage: true,
-    onPageClosedRetry: async () => { await devShot('before-retry'); saveLogcat('before-retry'); },
+    stopAfterStep1: process.env.STOP_AFTER_STEP1 === '1',
+    markStep1Start: async () => { step1Epoch = await deviceEpoch(); },
+    closedBySystem,
+    onPageClosedRetry: async () => { await devShot('before-retry'); saveLogcat('before-retry'); settle('before the step-1 retry'); },
     // The real Android Back key.
     back: async () => { await device.shell('input keyevent 4'); },
     async offline(page, on){

@@ -43,6 +43,14 @@ const CASES = {
       'function setTour(how){ meta.tour = { state:"done", how:how, at:now() }; saveMeta(); if (how === "finished"){ ' +
       'data.sections.push({ id:"tourx"+Date.now(), title:"Tour extra", created:now(), topics:[] }); saveSoon(0); } }'],
   ],
+  // Android emulator only (ci/android-checks.sh): the app itself crashes the page. 1.5 s after the version under
+  // test opens, it allocates memory without end until Chrome kills the page ("Aw, Snap! Out of memory"). In step 1
+  // that happens right after "tap to update". Proves an app-caused crash FAILS and is never retried.
+  // Not in ALL_CASES of ci/negative-checks.sh.
+  'crash-page': [
+    ['index.html', 'var APP_VERSION = "',
+      '(function(){ /* NEGATIVE CHECK ONLY: crash the page */ var junk = []; setTimeout(function(){ for (;;) junk.push(new Array(1e6).fill(Math.random())); }, 1500); })();\nvar APP_VERSION = "'],
+  ],
   'csp-removed-outside-image': [
     // Only the page's own CSP tag (the first one), not the one inside the print template.
     ['index.html', /<meta http-equiv="Content-Security-Policy" content="[^"]*">/,

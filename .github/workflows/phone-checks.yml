@@ -242,8 +242,14 @@ jobs:
           OUT: results/webkit-iphone
         run: node tests/run-browser.js
       - name: Open in the iPhone simulator's Safari (screenshots only, not checked)
+        id: simopen
         if: ${{ !cancelled() }}
+        continue-on-error: true   # screenshots only; a failure here shows as a warning below, not a failed job
+        timeout-minutes: 4
         run: bash ci/ios-simulator.sh open
+      - name: Warn if the Simulator screenshots are missing
+        if: ${{ always() && steps.simopen.outcome == 'failure' }}
+        run: echo "::warning::Could not open the app in the iPhone Simulator's Safari (screenshots only; does not affect pass/fail). Real-Safari screenshots are missing from this run."
       - name: Experimental, does not affect pass/fail — drive real Mobile Safari with safaridriver
         id: safari
         if: ${{ !cancelled() }}

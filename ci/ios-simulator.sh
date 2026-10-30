@@ -45,7 +45,14 @@ case "${1:-}" in
     ;;
   open)
     xcrun simctl bootstatus "${SIM_UDID:-booted}" -b
-    xcrun simctl openurl booted "${url}?cb=$(date +%s)"
+    # The Simulator can say "booted" before Safari is ready ("Operation timed out"), so try up to 3 times, 15 s apart.
+    opened=""
+    for try in 1 2 3; do
+      if xcrun simctl openurl booted "${url}?cb=$(date +%s)"; then opened=1; echo "Opened Safari on try $try"; break; fi
+      echo "openurl try $try failed"
+      [[ "$try" -lt 3 ]] && sleep 15
+    done
+    if [[ -z "$opened" ]]; then echo "Could not open Safari in the Simulator after 3 tries"; exit 1; fi
     sleep 12
     xcrun simctl io booted screenshot "$out/01-safari-opened.png"
     # The section list should be on screen; a second shot after a short wait shows it settled.
