@@ -17,10 +17,10 @@ that code, not whatever happens to be live. A separate, read-only check then ope
 | Job | Where it runs | What it uses |
 |---|---|---|
 | Chromium and WebKit at phone size | Linux | Playwright's Chromium (Android size) and Playwright's WebKit (iPhone size). WebKit is the engine inside Safari, **but it is not real Safari**. |
-| Real Chrome in the Android emulator | Linux with hardware speed-up (KVM) | Real Chrome on an emulated Android phone (Android 14, `google_apis` image). The phone reaches the test copy through `adb reverse`. If that image ever lacks Chrome, the job retries once on the `google_apis_playstore` image and shows a warning. If the emulator program itself vanishes mid-run (a known emulator problem, see ci-runs notes), the whole checklist is run once more on a new emulator, with a warning; every check must pass again. An ordinary FAIL is never retried this way. |
+| Real Chrome in the Android emulator | Linux with hardware speed-up (KVM) | Real Chrome on an emulated Android phone (Android 14, `google_apis` image). The phone reaches the test copy through `adb reverse`. If that image ever lacks Chrome, the job retries once on the `google_apis_playstore` image and shows a warning. If the emulator program itself vanishes mid-run (a known emulator problem, see ci-runs notes), the whole checklist is run once more on a new emulator, with a warning; every check must pass again. That retry happens only if every FAIL of the first try is emulator/adb trouble; if any real check failed, there is no retry and the job fails with the reason. **Fresh starts on Android:** Chrome is started once and reused. Before each group of checks, every tab is closed, the test site's service workers are unregistered, and all of the test site's saved data is deleted from inside Chrome. A marker is saved just before the clear. Then a recorded check proves the marker is gone and the site has nothing left (IndexedDB, service workers and no controlling one, offline copies, local and session storage, file storage, cookies, storage use about 0, not persistent, no permissions granted) and only one tab is open. Chrome is no longer force-stopped and wiped (`pm clear`) between fresh starts, because the emulator kept vanishing right at that moment. That old wipe is used only as a fallback, with a warning, if the site can't be confirmed empty; if it still isn't empty, the check fails. `tests/fresh-selftest.js` (run in the Linux job) proves this check catches leftover data. The `android_fresh` run input (`clear`, the normal one, or `wipe`) can switch to the old full wipe for every fresh start, for a side-by-side comparison. |
 | Negative check: a page-crashing copy of the app (own Android emulator) | Linux with KVM | Its own job and its own fresh emulator. It builds a copy of the app that crashes the page on purpose and runs step 1 once, with no retry. The job passes only if Chrome reports the page crash and step 1 FAILS, with no emulator or adb trouble. This proves an app-caused crash cannot slip through as a pass or a "system" retry. |
 | iPhone checks | macOS | Playwright WebKit with iPhone settings (**WebKit, not real Safari**), plus real Mobile Safari in the iOS Simulator (**screenshots only, not checked**). An experimental extra step drives the Simulator's Safari with safaridriver; it **does not affect pass/fail**, and if it fails the run shows a yellow warning. |
-| Live site smoke check | Linux | Opens the live site in fresh, empty browsers. It checks that the page loads, shows the expected version, and reopens with no internet. It never types or saves anything. |
+| Live site smoke check | Linux | Opens the live site in fresh, empty browsers. It checks that the live `index.html` and `sw.js` are byte for byte the files on the app's main branch (sha256), that the page loads, shows the expected version, and reopens with no internet. It never types or saves anything. |
 
 In each browser, the tests start with a brand-new, empty profile and use only made-up test data ("Phone test",
 "Test topic", "CI fixture section"). Each one checks:
@@ -165,6 +165,7 @@ This maps the 17 steps of the phone checklist for version 0.11.
 - `tests/serve.js`: the tiny local web server for the copy of the app being tested (no extra packages).
 - `tests/run-browser.js`: runs the checklist in Playwright Chromium or WebKit at phone size.
 - `tests/run-android.js`: runs the checklist in real Chrome in the Android emulator.
+- `tests/fresh-selftest.js`: proves the Android fresh-start check catches leftover data and fails if the data can't be cleared. `FRESH_MODE=reuse ENGINE=chromium node tests/run-browser.js` runs the whole checklist in Chromium using the same fresh-start method.
 - `tests/live-smoke.js`: the read-only live site check.
 - `tests/ios-safari-smoke.js`: the experimental real-Safari check in the iOS Simulator.
 - `tests/lib/checklist.js`: the checklist steps. `tests/lib/tour.js`: the tour checks.
@@ -199,7 +200,16 @@ The broken copies: wrong version, Add imports nothing, any file can Replace, onl
 support, Replace skips the safety copy, CSP removed plus an outside image, count/checksum check removed, the
 older version not downloadable, finishing the tour adds a section (0.12 and later), and six for the 0.12.1 tour (shown as "n/a" on older versions):
 Escape counts as finished, the tour never opens by itself, Skip shows the old 0.12 message, Help has no Take the tour
-button, the answer isn't saved, and the tour opens by itself for people who update. Each uses its own local port (8941 and up; never 8765).
+button, the answer isn't saved, the tour opens by itself for people who update, the tour doesn't resume after
+add-to-home-screen, closing mid-tour gives no message, finishing in another window is ignored, Help doesn't say
+"Downloads", and a brand-new copy shows a false "New version ready" note. Each uses its own local port (8941 and up,
+or `NEG_PORT`; never 8765). Each case must fail on **its own** check: the script has the exact FAIL line each case
+must hit (`EXPECT`). A case that fails some other way is `CAUGHT-WRONG`, one with no expected line is
+`NO-EXPECTED-CHECK`, and one whose test server didn't start is `SERVER-FAILED`; all of these count as not caught.
+
+**Tour fresh-copy loop (WebKit):** the WebKit runs open 30 brand-new copies in a row (`TOUR_LOOP` changes the
+number) and require the tour to open by itself every time, with no "New version ready" note. On 0.12.1 this is
+expected to fail now and then: that's a real app bug (the run C miss), to be fixed in 0.12.2.
 
 ## Commits
 

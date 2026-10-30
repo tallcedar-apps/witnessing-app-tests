@@ -63,6 +63,19 @@ if [[ "$(timeout 10 adb get-state 2>/dev/null)" != "device" ]]; then
   emu_gone=1
   emu_gone_report "$out/emulator-gone.txt"
   echo "::warning::The Android emulator stopped responding during the checks (see $out/emulator-gone.txt)."
+  # The workflow re-runs everything on a new emulator ONLY if every FAIL of this try is emulator/adb trouble
+  # (retry-allowed.txt). If any FAIL is something else (a real check failing), there is no retry (retry-refused.txt).
+  node -e '
+const fs = require("fs"), out = process.argv[1];
+const DEV = /androidDevice\.|Device is closed|device offline|no devices?\b|adb: (device|error)/i;
+let r = null; try { r = JSON.parse(fs.readFileSync(out + "/results.json", "utf8")); } catch (e) {}
+if (!r) { fs.writeFileSync(out + "/retry-refused.txt", "No retry: this try left no results.json, so it cannot be shown that every failure was emulator trouble.\n"); process.exit(0); }
+const fails = r.results.filter(x => x.status === "FAIL"), other = fails.filter(x => !DEV.test(x.detail || ""));
+const list = a => a.map(x => "[" + x.step + "] " + x.name + " — " + String(x.detail || "").replace(/\s+/g, " ").slice(0, 200)).join("\n");
+if (fails.length && !other.length) fs.writeFileSync(out + "/retry-allowed.txt", "Retry allowed: all " + fails.length + " FAIL row(s) of try 1 are emulator/adb trouble:\n" + list(fails) + "\n");
+else fs.writeFileSync(out + "/retry-refused.txt", "No retry: " + (fails.length ? other.length + " of " + fails.length + " FAIL row(s) of try 1 are NOT emulator/adb trouble:\n" + list(other) : "try 1 has no FAIL rows") + "\n");
+' "$out" || true
+  cat "$out/retry-allowed.txt" "$out/retry-refused.txt" 2>/dev/null || true
 fi
 # Every counted warning (for example a retried step) also shows as a GitHub warning on the run page.
 node -e '
@@ -107,7 +120,15 @@ const crashNote = r.notes.find(n => /CRASHED|CLOSED/.test(n));
 // The failure must come from the page crash, not from the emulator or adb going away.
 const deviceTrouble = fail1.some(x => /androidDevice|Device is closed|device offline|no device/i.test(x.detail || ""));
 console.log("Negative check: exit " + process.argv[2] + "; step-1 FAIL rows: " + fail1.length + " (" + fail1.map(x => x.name + ": " + x.detail).join(" | ").slice(0, 300) + "); warnings: " + r.warnings + "; retried: " + retried + "; crash seen: " + (crashNote || "NO") + "; emulator/adb trouble: " + deviceTrouble);
-process.exit(process.argv[2] !== "0" && fail1.length > 0 && !retried && crashNote && !deviceTrouble ? 0 : 1);
+// Say exactly why the proof is refused, if it is.
+const why = [];
+if (process.argv[2] === "0") why.push("the run passed (exit 0), so the crashing copy was not caught");
+if (!fail1.length) why.push("step 1 has no FAIL row");
+if (retried) why.push("Android re-ran step 1 (" + (r.results.filter(x => / \(try 1\)$/.test(x.name)).map(x => "row \"" + x.name + "\"").join(", ") || "no \"(try 1)\" row") + "; counted warnings: " + r.warnings + "), so the crash proof does not count: an app crash must fail step 1 on the first try, never be retried");
+if (!crashNote) why.push("no page crash or page close was seen");
+if (deviceTrouble) why.push("a step-1 FAIL came from the emulator or adb going away, not from the page crash");
+if (why.length) console.log("Refused: " + why.join("; ") + ".");
+process.exit(why.length ? 1 : 0);
 ' "$neg_out" "$neg_status" | tee "$neg_out/verdict.txt"; [[ "${PIPESTATUS[0]}" == 0 ]]; then
     neg_ok=1
   fi

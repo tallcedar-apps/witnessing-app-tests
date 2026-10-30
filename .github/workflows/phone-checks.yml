@@ -18,6 +18,12 @@ on:
         required: false
         default: ""
         type: string
+      android_fresh:
+        description: "Android fresh starts: clear = clear the test site from inside Chrome (normal); wipe = the old full Chrome wipe every time (only for a side-by-side comparison run)"
+        required: false
+        default: clear
+        type: choice
+        options: [clear, wipe]
   # Optional daily run. To turn it on, remove the # from the next two lines.
   # schedule:
   #   - cron: "17 10 * * *"   # every day at 10:17 UTC
@@ -27,13 +33,14 @@ permissions:
 
 concurrency:
   # One run at a time per branch AND app_ref, so a push doesn't cancel a manual run of a different app_ref.
-  group: phone-checks-${{ github.ref }}-${{ inputs.app_ref || 'main' }}
+  group: phone-checks-${{ github.ref }}-${{ inputs.app_ref || 'main' }}-${{ inputs.android_fresh || 'clear' }}
   cancel-in-progress: true
 
 env:
   APP_REPO: tallcedar-apps/witnessing-app
   APP_REF: ${{ inputs.app_ref || 'main' }}
   EXPECTED_INPUT: ${{ inputs.expected_version }}
+  ANDROID_FRESH: ${{ inputs.android_fresh || 'clear' }}   # read by tests/run-android.js
   APP_PORT: "8931"          # local test server port (never 8765)
   # Older app version used for the "update" check (checklist step 1): version 0.10, read-only from GitHub.
   OLD_REF: c0b4cad4d4f93aca04eeef2505a634c5fe35caaa
@@ -51,7 +58,11 @@ jobs:
         run: |
           [[ "$APP_REF" =~ ^[A-Za-z0-9._/-]{1,100}$ && "$APP_REF" != -* && "$APP_REF" != *..* ]] || { echo "::error::Bad app_ref (letters, digits, . _ / - only, up to 100)"; exit 1; }
           # A commit must be given in full (40 characters): a short one like c0b3e2f makes the app checkout fail later.
-          if [[ "$APP_REF" =~ ^[0-9a-fA-F]{4,39}$ || "$APP_REF" =~ ^[0-9a-fA-F]{41,}$ ]]; then echo "::error::app_ref '$APP_REF' looks like a shortened commit ID. Use the full 40-character commit ID, or a branch or tag name (like main)."; exit 1; fi
+          # A name made only of 0-9 a-f (like "cafe") can also be a real branch or tag: ask the app repo first.
+          if [[ "$APP_REF" =~ ^[0-9a-fA-F]{4,39}$ || "$APP_REF" =~ ^[0-9a-fA-F]{41,}$ ]]; then
+            if [[ -n "$(git ls-remote "https://github.com/$APP_REPO" "refs/heads/$APP_REF" "refs/tags/$APP_REF" 2>/dev/null)" ]]; then echo "app_ref '$APP_REF' is a branch or tag in $APP_REPO, so it is used as that name."
+            else echo "::error::app_ref '$APP_REF' looks like a shortened commit ID (no branch or tag has that name). Use the full 40-character commit ID, or a branch or tag name (like main)."; exit 1; fi
+          fi
           [[ -z "$EXPECTED_INPUT" || "$EXPECTED_INPUT" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]] || { echo "::error::Bad expected_version (like 0.12 or 0.12.1, or empty)"; exit 1; }
       - name: Get the tests
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -92,6 +103,12 @@ jobs:
           APP_URL: http://localhost:${{ env.APP_PORT }}/witnessing-app/
           OUT: results/webkit
         run: node tests/run-browser.js
+      - name: Self-test of the Android fresh-start check (it must catch leftover data, and fail if it can't be cleared)
+        if: ${{ !cancelled() && steps.ver.outcome == 'success' }}
+        env:
+          APP_URL: http://localhost:${{ env.APP_PORT }}/witnessing-app/
+          OUT: results/fresh-selftest
+        run: node tests/fresh-selftest.js
       - name: Save screenshots and test files
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -112,7 +129,11 @@ jobs:
         run: |
           [[ "$APP_REF" =~ ^[A-Za-z0-9._/-]{1,100}$ && "$APP_REF" != -* && "$APP_REF" != *..* ]] || { echo "::error::Bad app_ref (letters, digits, . _ / - only, up to 100)"; exit 1; }
           # A commit must be given in full (40 characters): a short one like c0b3e2f makes the app checkout fail later.
-          if [[ "$APP_REF" =~ ^[0-9a-fA-F]{4,39}$ || "$APP_REF" =~ ^[0-9a-fA-F]{41,}$ ]]; then echo "::error::app_ref '$APP_REF' looks like a shortened commit ID. Use the full 40-character commit ID, or a branch or tag name (like main)."; exit 1; fi
+          # A name made only of 0-9 a-f (like "cafe") can also be a real branch or tag: ask the app repo first.
+          if [[ "$APP_REF" =~ ^[0-9a-fA-F]{4,39}$ || "$APP_REF" =~ ^[0-9a-fA-F]{41,}$ ]]; then
+            if [[ -n "$(git ls-remote "https://github.com/$APP_REPO" "refs/heads/$APP_REF" "refs/tags/$APP_REF" 2>/dev/null)" ]]; then echo "app_ref '$APP_REF' is a branch or tag in $APP_REPO, so it is used as that name."
+            else echo "::error::app_ref '$APP_REF' looks like a shortened commit ID (no branch or tag has that name). Use the full 40-character commit ID, or a branch or tag name (like main)."; exit 1; fi
+          fi
           [[ -z "$EXPECTED_INPUT" || "$EXPECTED_INPUT" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]] || { echo "::error::Bad expected_version (like 0.12 or 0.12.1, or empty)"; exit 1; }
       - name: Get the tests
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -194,12 +215,13 @@ jobs:
           # (Run 6, with Vulkan off, still lost the emulator once, during the negative check; so this is not proven to help.)
           emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none -no-snapshot -feature -Vulkan
           script: bash ci/android-checks.sh
-      # Only when the emulator PROGRAM itself vanished mid-run (results/android/emulator-gone.txt exists; never for an
-      # ordinary FAIL): run the whole checklist once more on a brand-new emulator. Every check runs again and must
+      # Only when the emulator PROGRAM itself vanished mid-run AND every FAIL of the first try is emulator/adb trouble
+      # (ci/android-checks.sh then writes results/android/retry-allowed.txt; if any FAIL is a real check failing it
+      # writes retry-refused.txt instead and there is no retry): run the whole checklist once more on a new emulator. Every check runs again and must
       # pass; the run page shows a warning, and the first try's results stay in the artifacts (results/android).
       - name: Retry once on a new emulator — only because the emulator program itself vanished
         id: emu_retry
-        if: ${{ !cancelled() && steps.emu.outcome == 'failure' && hashFiles('results/android/emulator-gone.txt') != '' && hashFiles('results/android-chrome-missing.txt') == '' }}
+        if: ${{ !cancelled() && steps.emu.outcome == 'failure' && hashFiles('results/android/retry-allowed.txt') != '' && hashFiles('results/android-chrome-missing.txt') == '' }}
         continue-on-error: true   # the "Result" step below decides
         uses: ReactiveCircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2.38.0
         env:
@@ -226,7 +248,10 @@ jobs:
           RETRY: ${{ steps.emu_retry.outcome }}
         run: |
           if [[ "$EMU" == "success" ]]; then echo "Android checks passed on google_apis."; exit 0; fi
-          if [[ -f results/android/emulator-gone.txt && ! -f results/android-chrome-missing.txt ]]; then
+          if [[ -f results/android/retry-refused.txt ]]; then
+            echo "::error::The Android emulator vanished, but the first try also had failures that are not emulator trouble, so it was NOT retried:"; cat results/android/retry-refused.txt; exit 1
+          fi
+          if [[ -f results/android/retry-allowed.txt && ! -f results/android-chrome-missing.txt ]]; then
             echo "::warning::The Android emulator program vanished during the first try (see results/android/emulator-gone.txt); the whole checklist was run again on a new emulator."
             if [[ "$RETRY" == "success" ]]; then echo "Android checks passed on the second, new emulator (all checks re-run)."; exit 0; fi
             echo "::error::Android checks failed on the second emulator too ($RETRY)."; exit 1
@@ -269,7 +294,11 @@ jobs:
         run: |
           [[ "$APP_REF" =~ ^[A-Za-z0-9._/-]{1,100}$ && "$APP_REF" != -* && "$APP_REF" != *..* ]] || { echo "::error::Bad app_ref (letters, digits, . _ / - only, up to 100)"; exit 1; }
           # A commit must be given in full (40 characters): a short one like c0b3e2f makes the app checkout fail later.
-          if [[ "$APP_REF" =~ ^[0-9a-fA-F]{4,39}$ || "$APP_REF" =~ ^[0-9a-fA-F]{41,}$ ]]; then echo "::error::app_ref '$APP_REF' looks like a shortened commit ID. Use the full 40-character commit ID, or a branch or tag name (like main)."; exit 1; fi
+          # A name made only of 0-9 a-f (like "cafe") can also be a real branch or tag: ask the app repo first.
+          if [[ "$APP_REF" =~ ^[0-9a-fA-F]{4,39}$ || "$APP_REF" =~ ^[0-9a-fA-F]{41,}$ ]]; then
+            if [[ -n "$(git ls-remote "https://github.com/$APP_REPO" "refs/heads/$APP_REF" "refs/tags/$APP_REF" 2>/dev/null)" ]]; then echo "app_ref '$APP_REF' is a branch or tag in $APP_REPO, so it is used as that name."
+            else echo "::error::app_ref '$APP_REF' looks like a shortened commit ID (no branch or tag has that name). Use the full 40-character commit ID, or a branch or tag name (like main)."; exit 1; fi
+          fi
           [[ -z "$EXPECTED_INPUT" || "$EXPECTED_INPUT" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]] || { echo "::error::Bad expected_version (like 0.12 or 0.12.1, or empty)"; exit 1; }
       - name: Get the tests
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -351,7 +380,11 @@ jobs:
         run: |
           [[ "$APP_REF" =~ ^[A-Za-z0-9._/-]{1,100}$ && "$APP_REF" != -* && "$APP_REF" != *..* ]] || { echo "::error::Bad app_ref (letters, digits, . _ / - only, up to 100)"; exit 1; }
           # A commit must be given in full (40 characters): a short one like c0b3e2f makes the app checkout fail later.
-          if [[ "$APP_REF" =~ ^[0-9a-fA-F]{4,39}$ || "$APP_REF" =~ ^[0-9a-fA-F]{41,}$ ]]; then echo "::error::app_ref '$APP_REF' looks like a shortened commit ID. Use the full 40-character commit ID, or a branch or tag name (like main)."; exit 1; fi
+          # A name made only of 0-9 a-f (like "cafe") can also be a real branch or tag: ask the app repo first.
+          if [[ "$APP_REF" =~ ^[0-9a-fA-F]{4,39}$ || "$APP_REF" =~ ^[0-9a-fA-F]{41,}$ ]]; then
+            if [[ -n "$(git ls-remote "https://github.com/$APP_REPO" "refs/heads/$APP_REF" "refs/tags/$APP_REF" 2>/dev/null)" ]]; then echo "app_ref '$APP_REF' is a branch or tag in $APP_REPO, so it is used as that name."
+            else echo "::error::app_ref '$APP_REF' looks like a shortened commit ID (no branch or tag has that name). Use the full 40-character commit ID, or a branch or tag name (like main)."; exit 1; fi
+          fi
           [[ -z "$EXPECTED_INPUT" || "$EXPECTED_INPUT" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]] || { echo "::error::Bad expected_version (like 0.12 or 0.12.1, or empty)"; exit 1; }
       - name: Get the tests
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -440,7 +473,11 @@ jobs:
         run: |
           [[ "$APP_REF" =~ ^[A-Za-z0-9._/-]{1,100}$ && "$APP_REF" != -* && "$APP_REF" != *..* ]] || { echo "::error::Bad app_ref (letters, digits, . _ / - only, up to 100)"; exit 1; }
           # A commit must be given in full (40 characters): a short one like c0b3e2f makes the app checkout fail later.
-          if [[ "$APP_REF" =~ ^[0-9a-fA-F]{4,39}$ || "$APP_REF" =~ ^[0-9a-fA-F]{41,}$ ]]; then echo "::error::app_ref '$APP_REF' looks like a shortened commit ID. Use the full 40-character commit ID, or a branch or tag name (like main)."; exit 1; fi
+          # A name made only of 0-9 a-f (like "cafe") can also be a real branch or tag: ask the app repo first.
+          if [[ "$APP_REF" =~ ^[0-9a-fA-F]{4,39}$ || "$APP_REF" =~ ^[0-9a-fA-F]{41,}$ ]]; then
+            if [[ -n "$(git ls-remote "https://github.com/$APP_REPO" "refs/heads/$APP_REF" "refs/tags/$APP_REF" 2>/dev/null)" ]]; then echo "app_ref '$APP_REF' is a branch or tag in $APP_REPO, so it is used as that name."
+            else echo "::error::app_ref '$APP_REF' looks like a shortened commit ID (no branch or tag has that name). Use the full 40-character commit ID, or a branch or tag name (like main)."; exit 1; fi
+          fi
           [[ -z "$EXPECTED_INPUT" || "$EXPECTED_INPUT" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]] || { echo "::error::Bad expected_version (like 0.12 or 0.12.1, or empty)"; exit 1; }
       - name: Get the tests
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -470,10 +507,11 @@ jobs:
         run: |
           npm ci
           npx playwright install --with-deps chromium webkit
-      - name: Open the live site (Chromium and WebKit), check the version, reopen offline
+      - name: Open the live site (Chromium and WebKit), check the version and the exact files, reopen offline
         env:
           EXPECTED_VERSION: ${{ steps.ver.outputs.version }}
           LIVE_URL: https://tallcedar-apps.github.io/witnessing-app/
+          APP_DIR: app     # the live index.html and sw.js must match main's files exactly (sha256)
           OUT: results/live-smoke
         run: node tests/live-smoke.js
       - name: Save screenshots

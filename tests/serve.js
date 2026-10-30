@@ -24,6 +24,9 @@ http.createServer((req, res) => {
     }
     res.writeHead(400); return res.end('bad request');
   }
+  // Test-only blank page on the same site, used to clear and then confirm the site's saved data before each fresh start.
+  // It is outside the app's folder, so no service worker controls it and the app never runs on it.
+  if (u.pathname === '/__ci/blank') { res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' }); return res.end('<!doctype html><title>blank</title>'); }
   // Probe used by the offline checks: answers 204 only while the server is reachable.
   if (u.pathname === BASE + 'ci-probe') { res.writeHead(204, { 'cache-control': 'no-store' }); return res.end(); }
   if (u.pathname === '/' ) { res.writeHead(302, { location: BASE }); return res.end(); }

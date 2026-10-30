@@ -14,6 +14,9 @@ const OUT = process.env.OUT || path.join('results', 'android');
 if (PORT === '8765') { console.error('Port 8765 is not allowed.'); process.exit(2); }
 if (!V) { console.error('EXPECTED_VERSION is required'); process.exit(2); }
 const CHROME = 'com.android.chrome';
+// ANDROID_FRESH=wipe: the old way for every fresh start (force-stop + "pm clear" Chrome), still proven empty the same
+// way. Only for the one side-by-side comparison run; the default (clear) clears the site from inside Chrome.
+const FORCE_WIPE = process.env.ANDROID_FRESH === 'wipe';
 const adb = (...a) => execFileSync('adb', a, { encoding: 'utf8', timeout: 60000 }).trim();
 const reverseOn = () => adb('reverse', 'tcp:' + PORT, 'tcp:' + PORT);
 const reverseOff = () => { try { adb('reverse', '--remove', 'tcp:' + PORT); } catch (e) { /* already removed */ } };
@@ -25,6 +28,7 @@ const reverseOff = () => { try { adb('reverse', '--remove', 'tcp:' + PORT); } ca
   if (process.env.OLD_REF){ try { old = await fetchOld(process.env.OLD_REF); } catch (e) { oldError = e.message; } }
   const [device] = await _android.devices();
   if (!device) { rec.check('setup', 'an Android emulator is connected', false, 'adb lists no device'); process.exit(rec.finish()); }
+  rec.note('Fresh-start method: ' + (FORCE_WIPE ? 'full Chrome wipe (force-stop + pm clear) every time — side-by-side run (ANDROID_FRESH=wipe)' : 'clear the test site from inside Chrome (pm clear only as a fallback)'));
   rec.note('Device: ' + device.model() + ' (serial ' + device.serial() + ')');
   try { rec.note('Chrome: ' + (await device.shell('dumpsys package ' + CHROME + ' | grep -m1 versionName')).toString().trim()); } catch (e) { /* informational only */ }
   let ctx = null, devShots = 0, logcats = 0, closingCtx = false, freshN = 0;
@@ -48,47 +52,60 @@ const reverseOff = () => { try { adb('reverse', '--remove', 'tcp:' + PORT); } ca
     fs.writeFileSync(path.join(OUT, 'device', 'logcat-' + String(++logcats).padStart(2, '0') + '-' + name + '.txt'), execFileSync('adb', ['logcat', '-d', '-b', 'main,system,crash,events', '-v', 'time'], { encoding: 'utf8', timeout: 60000, maxBuffer: 64 * 1024 * 1024 })); }
     catch (e) { console.log('logcat copy failed: ' + e.message); } };
   const devShot = async name => { try { fs.mkdirSync(path.join(OUT, 'device'), { recursive: true }); await device.screenshot({ path: path.join(OUT, 'device', String(++devShots).padStart(2, '0') + '-' + name + '.png') }); } catch (e) { console.log('device screenshot failed: ' + e.message); } };
+  let ctxDead = false, inReset = false, launches = 0;
+  // Start Chrome and connect to it. (Playwright's launchBrowser itself runs "am force-stop" first; that only happens
+  // here: before the first fresh start, when Chrome isn't running yet, or after Android has already shut Chrome down.)
+  const launch = async label => {
+    // Emulator setup only: allow Chrome's notifications up front so Chrome's own "Chrome notifications make
+    // things easier" sheet doesn't cover the page and swallow the Back key. (The app never uses notifications.)
+    await device.shell('pm grant ' + CHROME + ' android.permission.POST_NOTIFICATIONS').catch(() => {});
+    const c = await withLimit(device.launchBrowser({ pkg: CHROME }), 120000, 'starting Chrome (' + label + ')');
+    ctx = c; ctxDead = false; launches++;
+    c.on('close', () => { if (ctx === c) ctxDead = true; });
+    await H.watchRequests(c, env.outside, env.allowedHosts);   // any request to another site fails the run
+    await c.addInitScript(H.TOAST_LOG); await c.addInitScript(H.SHARE_MOCK); await c.addInitScript(H.PRINT_STUB);
+    c.on('page', p => { if (!inReset) rec.note('Chrome opened another tab: ' + p.url()); });
+    rec.note('Chrome started (' + label + '; start ' + launches + ')');
+  };
+  // FALLBACK ONLY (counted warning in H.cleanStart): the old full wipe, i.e. force-stop Chrome, "pm clear" it, start it again.
+  const wipeAndLaunch = async n => {
+    if (ctx) { closingCtx = true; await ctx.close().catch(() => {}); closingCtx = false; ctx = null; }
+    await device.shell('input keyevent 3').catch(() => {});
+    for (let i = 0; i < 10; i++) { const w = String(await device.shell('dumpsys window | grep -m1 mCurrentFocus || true')); if (!/com\.android\.chrome/.test(w)) break; await new Promise(r => setTimeout(r, 500)); }
+    await new Promise(r => setTimeout(r, 2000));
+    await withLimit(device.shell('am force-stop ' + CHROME), 120000, 'stopping Chrome (fallback wipe, fresh start ' + n + ')');
+    for (let i = 0; i < 30; i++) { const p = String(await device.shell('pidof ' + CHROME + ' || true')).trim(); if (!p) break; await new Promise(r => setTimeout(r, 500)); }
+    await new Promise(r => setTimeout(r, 1000));
+    await withLimit(device.shell('pm clear ' + CHROME), 120000, 'pm clear (fallback wipe, fresh start ' + n + ')');
+    await launch('after the fallback wipe, fresh start ' + n);
+  };
   const env = {
     base: URL_, expectedVersion: V, picker: true, engineLabel: 'Android Chrome',
     oldRef: process.env.OLD_REF || '', oldError, oldFiles: old && old.files, oldVersion: old && old.version,
     outside: [], allowedHosts: H.LOCAL_HOSTS,
+    // A fresh start for each group of checks. Chrome is started ONCE and reused: before each group, every tab is
+    // closed, the test site's service workers are unregistered, and ALL of the test site's saved data is deleted from
+    // inside Chrome (see H.resetOrigin); then H.cleanStart PROVES the site has no saved data left and only one tab is
+    // open (a recorded check). Chrome is no longer force-stopped / "pm clear"-ed between fresh starts, because in
+    // runs 7, 9, 41015994588 and 41017896562 the emulator program itself vanished right as Chrome was force-stopped
+    // for that wipe. The old wipe is kept only as a fallback if the site can't be confirmed empty (counted WARNING).
+    // ANDROID_FRESH=wipe (one side-by-side run only): use the old full wipe for every fresh start, then the same proof.
     async fresh({ picker } = {}){
-      if (ctx) { closingCtx = true; await ctx.close().catch(() => {}); closingCtx = false; ctx = null; }
-      // A fresh, empty Chrome profile: wipes only the emulator's Chrome data (made-up test data only).
-      // Test setup only: 120 s limits on "pm clear" and starting Chrome, and how long each took goes in the log.
       const tf = Date.now(); freshN++;
-      // Emulator setup only: stop Chrome and wait (up to 15 s) until its processes are gone before wiping its data.
-      // In 4 of 7 Android tries the emulator itself died on a "pm clear" issued right after Chrome was closed.
-      // Emulator setup only: first send Chrome to the background (Home key) and give it a moment to stop drawing.
-      // Evidence (run 41007171550, streamed system log): the emulator program vanished within about 0.05 s of
-      // "am force-stop" killing Chrome's GPU process while Chrome was still on screen, with no crash report.
-      if (freshN > 1){
-        await device.shell('input keyevent 3').catch(() => {});
-        for (let i = 0; i < 10; i++) { const w = String(await device.shell('dumpsys window | grep -m1 mCurrentFocus || true')); if (!/com\.android\.chrome/.test(w)) break; await new Promise(r => setTimeout(r, 500)); }
-        await new Promise(r => setTimeout(r, 2000));
-      }
-      await withLimit(device.shell('am force-stop ' + CHROME), 120000, 'stopping Chrome (fresh profile ' + freshN + ')');
-      for (let i = 0; i < 30; i++) { const p = String(await device.shell('pidof ' + CHROME + ' || true')).trim(); if (!p) break; await new Promise(r => setTimeout(r, 500)); }
-      await new Promise(r => setTimeout(r, 1000));
-      await withLimit(device.shell('pm clear ' + CHROME), 120000, 'pm clear (fresh profile ' + freshN + ')');
-      const tClear = Date.now() - tf;
-      // Emulator setup only: allow Chrome's notifications up front so Chrome's own "Chrome notifications make
-      // things easier" sheet doesn't cover the page and swallow the Back key. (The app never uses notifications.)
-      await device.shell('pm grant ' + CHROME + ' android.permission.POST_NOTIFICATIONS').catch(() => {});
-      ctx = await withLimit(device.launchBrowser({ pkg: CHROME }), 120000, 'starting Chrome (fresh profile ' + freshN + ')');
-      console.log('NOTE fresh profile ' + freshN + ' ready in ' + ((Date.now() - tf) / 1000).toFixed(1) + ' s (pm clear ' + (tClear / 1000).toFixed(1) + ' s)');
-      await H.watchRequests(ctx, env.outside, env.allowedHosts);   // any request to another site fails the run
-      await ctx.addInitScript(H.TOAST_LOG); await ctx.addInitScript(H.SHARE_MOCK); await ctx.addInitScript(H.PRINT_STUB);
-      await ctx.addInitScript(picker ? H.PICKER_MOCK : H.NO_PICKER);
-      const page = ctx.pages()[0] || await ctx.newPage();
+      let how = 'Chrome reused';
+      if (!FORCE_WIPE && (!ctx || ctxDead)){ await launch('fresh start ' + freshN); how = 'Chrome started'; }
+      inReset = true;
+      let page, cs;
+      try { cs = await H.cleanStart(ctx, env.base, rec, freshN, async () => { await wipeAndLaunch(freshN); return ctx; }, { forceWipe: FORCE_WIPE }); ctx = cs.ctx; page = cs.page; }
+      finally { inReset = false; }
+      console.log('NOTE fresh start ' + freshN + ' ready in ' + ((Date.now() - tf) / 1000).toFixed(1) + ' s (' + how + '; ' + cs.how + ')');
+      await page.addInitScript(picker ? H.PICKER_MOCK : H.NO_PICKER);
       page.on('dialog', H.dialogLogger(rec));
-      // Diagnostics only: say when Chrome closes or crashes the test's page, or opens another tab, with a device screenshot.
+      // Diagnostics only: say when Chrome closes or crashes the test's page, with a device screenshot.
       let finished = false; const t0 = Date.now();
       page.on('crash', () => { rec.note('Chrome reported the page CRASHED after ' + (Date.now() - t0) + ' ms'); devShot('page-crashed'); });
-      page.on('close', () => { if (!finished && !closingCtx) { rec.note('the test page CLOSED unexpectedly after ' + (Date.now() - t0) + ' ms'); devShot('page-closed'); saveLogcat('page-closed'); } });
-      ctx.on('page', p => rec.note('Chrome opened another tab: ' + p.url()));
-      const mine = ctx;
-      return { page, ctx, done: async () => { finished = true; await devShot('profile-end'); await mine.close().catch(() => {}); if (ctx === mine) ctx = null; } };
+      page.on('close', () => { if (!finished && !closingCtx && !inReset) { rec.note('the test page CLOSED unexpectedly after ' + (Date.now() - t0) + ' ms'); devShot('page-closed'); saveLogcat('page-closed'); } });
+      return { page, ctx, done: async () => { finished = true; await devShot('profile-end'); await page.close().catch(() => {}); } };
     },
     android: true, retryClosedPage: true,
     stopAfterStep1: process.env.STOP_AFTER_STEP1 === '1',

@@ -5,7 +5,8 @@
 //   the page loads, it says "Version <EXPECTED_VERSION>", the offline helper takes control, it reopens offline,
 //   its Content-Security-Policy is exactly the expected one, and no request goes to any site except the live site's own.
 // Env: LIVE_URL (default the live site), EXPECTED_VERSION (required), OUT, CHROME_PATH (optional),
-//      LIVE_TRIES / LIVE_WAIT_S: retries while GitHub Pages catches up after a push (default 6 tries, 30 s apart).
+//      LIVE_TRIES / LIVE_WAIT_S: retries while GitHub Pages catches up after a push (default 6 tries, 30 s apart),
+//      APP_DIR: the app's main branch checked out (the live index.html and sw.js must match its files byte for byte).
 const pw = require('playwright'); const path = require('path'); const fs = require('fs'); const os = require('os');
 const H = require('./lib/helpers'); const { dismissTourIfShown } = require('./lib/tour');
 
@@ -58,8 +59,30 @@ async function one(rec, engine){
   finally { await ctx.close().catch(() => {}); fs.rmSync(dir, { recursive: true, force: true }); }
 }
 
+// The live index.html and sw.js must be exactly the files on the app's main branch (sha256 of the bytes), not just
+// say the right version. Fetched with a cache-busting query; retried like the version check while Pages catches up.
+async function sameFiles(rec){
+  const S = 'live files', dir = process.env.APP_DIR;
+  if (!dir) { rec.skip(S, 'the live index.html and sw.js match the app\'s main branch (sha256)', 'APP_DIR is not set'); return; }
+  const crypto = require('crypto'), sha = b => crypto.createHash('sha256').update(b).digest('hex');
+  const want = {}; for (const f of ['index.html', 'sw.js']) want[f] = sha(fs.readFileSync(path.join(dir, f)));
+  let got = {};
+  for (let i = 1; i <= TRIES; i++){
+    got = {};
+    for (const f of ['index.html', 'sw.js']){
+      try { const r = await fetch(URL_ + f + '?cb=' + Date.now(), { cache: 'no-store' }); got[f] = r.ok ? sha(Buffer.from(await r.arrayBuffer())) : 'HTTP ' + r.status; }
+      catch (e) { got[f] = 'error ' + e.message; }
+    }
+    if (got['index.html'] === want['index.html'] && got['sw.js'] === want['sw.js']) break;
+    if (i < TRIES){ rec.note(S + ': try ' + i + ' did not match yet; waiting ' + WAIT + ' s for GitHub Pages to catch up'); await new Promise(r => setTimeout(r, WAIT * 1000)); }
+  }
+  for (const f of ['index.html', 'sw.js'])
+    rec.check(S, 'the live ' + f + ' is exactly the one on the app\'s main branch (sha256 ' + want[f].slice(0, 12) + '…)', got[f] === want[f], 'live ' + got[f] + ' / main ' + want[f]);
+}
+
 (async () => {
   const rec = H.makeRecorder('Live site smoke check (read-only) — ' + URL_ + ' — expecting ' + V, OUT);
+  await sameFiles(rec);
   for (const e of (process.env.ENGINES || 'chromium,webkit').split(',')) await one(rec, e.trim());
   process.exit(rec.finish());
 })();

@@ -196,6 +196,125 @@ async function toastSeen(page, re, timeout){
   for (;;) { if ((await toastLog(page)).some(x => re.test(x)) || re.test(await toastNow(page).catch(() => ''))) return true;
     if (Date.now() > end) return false; await page.waitForTimeout(200); }
 }
+// ---------- Fresh start without a new browser profile (Android: Chrome is started once and reused) ----------
+// 1. Open one new tab and close every other tab (so no page of the test site is open).
+// 2. On the site's blank page (/__ci/blank, served by tests/serve.js, outside the app): plant a MARKER (an IndexedDB
+//    database, a local-storage key and an offline copy, all named __ci_marker) and unregister the site's service workers.
+// 3. Leave the site (about:blank), then delete ALL of the test site's saved data with Chrome's own command
+//    (Storage.clearDataForOrigin, storage types "all": IndexedDB, local storage, service workers, offline copies
+//    (Cache Storage), file storage, cookies, ...), plus Chrome's web (HTTP) cache (Network.clearBrowserCache).
+// 4. Open a NEW tab, close the old one, and load the blank page there (freshState then checks it).
+// Returns { page, unregistered, planted, clearMs }.
+const CI_BLANK = '/__ci/blank';
+async function resetOrigin(ctx, base){
+  const origin = new URL(base).origin, blank = origin + CI_BLANK, t0 = Date.now();
+  const keep = await ctx.newPage();
+  for (const p of ctx.pages()) if (p !== keep) await p.close().catch(() => {});
+  await keep.goto(blank);
+  const planted = await keep.evaluate(async () => {
+    const out = {};
+    try { localStorage.__ci_marker = '1'; out.localStorage = localStorage.__ci_marker === '1'; } catch (e) { out.localStorage = false; }
+    try { await new Promise((res, rej) => { const q = indexedDB.open('__ci_marker'); q.onupgradeneeded = () => q.result.createObjectStore('m');
+        q.onsuccess = () => { const db = q.result; const tx = db.transaction('m', 'readwrite'); tx.objectStore('m').put(1, 'k'); tx.oncomplete = () => { db.close(); res(); }; tx.onerror = () => rej(tx.error); };
+        q.onerror = () => rej(q.error); });
+      out.indexedDB = (await indexedDB.databases()).some(d => d.name === '__ci_marker'); } catch (e) { out.indexedDB = false; }
+    try { const c = await caches.open('__ci_marker'); await c.put('/__ci/marker', new Response('marker')); out.caches = (await caches.keys()).includes('__ci_marker'); } catch (e) { out.caches = false; }
+    return out;
+  });
+  const unregistered = await keep.evaluate(async () => { const rs = await navigator.serviceWorker.getRegistrations(); for (const r of rs) await r.unregister(); return rs.length; });
+  await keep.goto('about:blank');
+  const c0 = Date.now();
+  const cdp = await ctx.newCDPSession(keep);
+  try {
+    await cdp.send('Storage.clearDataForOrigin', { origin, storageTypes: 'all' });
+    await cdp.send('Network.clearBrowserCache');
+  } finally { await cdp.detach().catch(() => {}); }
+  const clearMs = Date.now() - c0;
+  const page = await ctx.newPage();
+  await keep.close().catch(() => {});
+  await page.goto(blank);
+  return { page, unregistered, planted, clearMs, totalMs: Date.now() - t0 };
+}
+// Most bytes the browser may still report as used by the test site after clearing (navigator.storage.estimate()).
+// "About zero": an empty site reports 0 in Chromium; a little room is left for the browser's own bookkeeping.
+const FRESH_USAGE_MAX = 64 * 1024;
+// Reads everything the test site has saved, from the site's blank page. Fresh = every list empty and one tab open:
+// no IndexedDB, local or session storage, cookies, file storage, offline copies (Cache Storage), service-worker
+// registrations or controlling service worker; storage use about 0; storage not marked persistent; the
+// persistent-storage and notifications permissions not granted; and no __ci_marker left.
+async function freshState(ctx, page, base){
+  const blank = new URL(base).origin + CI_BLANK;
+  if (page.url() !== blank) await page.goto(blank);
+  const s = await page.evaluate(async max => {
+    const out = {}, err = e => ['(could not read: ' + (e && e.message || e) + ')'];
+    try { out.indexedDB = (await indexedDB.databases()).map(d => d.name); } catch (e) { out.indexedDB = err(e); }
+    try { out.serviceWorkers = (await navigator.serviceWorker.getRegistrations()).map(r => r.scope); } catch (e) { out.serviceWorkers = err(e); }
+    try { out.swController = navigator.serviceWorker.controller ? [navigator.serviceWorker.controller.scriptURL] : []; } catch (e) { out.swController = err(e); }
+    try { out.caches = await caches.keys(); } catch (e) { out.caches = err(e); }
+    try { out.localStorage = Object.keys(localStorage); } catch (e) { out.localStorage = err(e); }
+    try { out.sessionStorage = Object.keys(sessionStorage); } catch (e) { out.sessionStorage = err(e); }
+    try { const r = await navigator.storage.getDirectory(); out.files = []; for await (const [n] of r.entries()) out.files.push(n); } catch (e) { out.files = err(e); }
+    out.cookies = document.cookie ? document.cookie.split(';').map(c => c.trim().split('=')[0]) : [];
+    try { const est = await navigator.storage.estimate(); out.usageBytes = est.usage; out.storageUse = est.usage > max ? [est.usage + ' bytes in use'] : []; } catch (e) { out.storageUse = err(e); }
+    try { out.persisted = (await navigator.storage.persisted()) ? ['storage is marked persistent'] : []; } catch (e) { out.persisted = err(e); }
+    out.permissions = [];
+    for (const name of ['persistent-storage', 'notifications']){
+      try { const q = await navigator.permissions.query({ name }); out['perm_' + name] = q.state; if (q.state === 'granted') out.permissions.push(name + ' granted'); }
+      catch (e) { out.permissions.push(name + ' (could not read: ' + e.message + ')'); }
+    }
+    return out;
+  }, FRESH_USAGE_MAX);
+  s.otherTabs = ctx.pages().filter(p => p !== page).map(p => p.url());
+  s.marker = [].concat(s.indexedDB, s.localStorage, s.caches).filter(n => /__ci_marker/.test(n));
+  const left = Object.entries(s).filter(([, v]) => Array.isArray(v) && v.length).map(([k, v]) => k + ': ' + JSON.stringify(v));
+  return { fresh: left.length === 0, left: left.join('; '), state: s };
+}
+const markerOk = r => !!(r && r.planted && r.planted.localStorage && r.planted.indexedDB && r.planted.caches);
+// Before each fresh start when the browser is reused: clear the test site (up to 3 tries), then PROVE it is empty:
+// the marker planted just before the clear must have been written and must be gone, and freshState must find nothing.
+// If it still isn't, `fallback()` (Android: the old force-stop + "pm clear" + new Chrome) is used with a counted
+// WARNING, and the site is checked again. The result is a recorded check; if the site is still not empty, this
+// throws, so no fresh-start check can ever pass on old data. Returns { ctx, page } (page left on about:blank).
+// opts.forceWipe: use the full wipe every time (for the side-by-side run; a note, not a warning).
+async function cleanStart(ctx, base, rec, n, fallback, opts){
+  opts = opts || {};
+  const tries = []; let r, st, how = 'cleared from inside the browser';
+  const attempt = async withMarker => {
+    try { r = await resetOrigin(ctx, base); st = await freshState(ctx, r.page, base);
+      if (withMarker && !markerOk(r)) st = { fresh: false, left: 'the marker could not be planted before clearing: ' + JSON.stringify(r.planted) + (st.left ? '; ' + st.left : ''), state: st.state };
+    } catch (e) { st = { fresh: false, left: 'error: ' + e.message.split('\n')[0] }; }
+  };
+  if (opts.forceWipe){
+    ctx = await fallback(); how = 'full browser wipe (chosen for the side-by-side run)';
+    await attempt(true);
+  } else {
+    for (let i = 1; i <= 3; i++){
+      await attempt(true);
+      if (st.fresh) break;
+      tries.push('try ' + i + ': ' + st.left); await new Promise(res => setTimeout(res, 1000));
+    }
+    if (!st.fresh){
+      rec.warn('Fresh start', 'fresh start ' + n + ': clearing the test site from inside the browser did not leave it empty, so the full browser wipe was used instead', tries.join(' | '));
+      ctx = await fallback(); how = 'full browser wipe (fallback)';
+      await attempt(true);
+    }
+  }
+  const S = st.state || {};
+  rec.note('fresh start ' + n + ': ' + how + '; clear took ' + (r ? r.clearMs : '?') + ' ms (' + (r ? r.totalMs : '?') + ' ms with tab handling and the marker); storage in use after: ' + S.usageBytes + ' bytes; permissions: persistent-storage ' + S['perm_persistent-storage'] + ', notifications ' + S.perm_notifications);
+  rec.check('Fresh start', 'fresh start ' + n + ': a marker planted just before clearing is gone, and the test site has no saved data left (IndexedDB, local and session storage, cookies, file storage, offline copies, service workers or a controlling one, storage use about 0, not persistent, no permissions granted) and only one tab is open', st.fresh, how + (st.left ? ' — ' + st.left : ''));
+  if (!st.fresh) throw new Error('fresh start ' + n + ': the test site still has saved data: ' + st.left);
+  await r.page.goto('about:blank');
+  return { ctx, page: r.page, how };
+}
+// Init script for brand-new copies: records whether the "New version ready" note (#updnote) was ever shown
+// (sessionStorage.__ciUpdnote = JSON list of { ms since the page started, text }).
+const UPDNOTE_WATCH = `(() => { const hook = () => { const u = document.getElementById('updnote'); if (!u) return;
+  const seen = () => { try { if (!u.hidden){ const a = JSON.parse(sessionStorage.__ciUpdnote || '[]'); a.push({ ms: Math.round(performance.now()), text: (u.textContent || '').trim().slice(0, 120) }); sessionStorage.__ciUpdnote = JSON.stringify(a.slice(-10)); } } catch (e) {} };
+  seen(); new MutationObserver(seen).observe(u, { attributes: true, attributeFilter: ['hidden'] }); };
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', hook); else hook(); })();`;
+const updnoteSeen = page => page.evaluate(() => JSON.parse(sessionStorage.__ciUpdnote || '[]')).catch(e => [{ error: e.message }]);
+// No share sheet at all (for the "saves to Downloads" check).
+const NO_SHARE = () => { try { Object.defineProperty(navigator, 'share', { configurable: true, value: undefined }); Object.defineProperty(navigator, 'canShare', { configurable: true, value: undefined }); } catch (e) {} };
 module.exports = { TOAST_LOG, clearToasts, toastLog, toastSeen, serveOld, FALLBACK_URL, shortVer, vge, makeRecorder, mtext, modalOpen, mclose, closeResult, choices, choice, waitToast, toastNow, st, btn, hash, appVersion,
   SHARE_MOCK, PICKER_MOCK, NO_PICKER, PRINT_STUB, sharedFiles, captureShared, readSpotFile, listSpotFiles, restoreFile, saveFixture, appReady, swReady, reachesServer, attachErrorLog,
-  LOCAL_HOSTS, hostOf, watchRequests, EXPECTED_CSP, readCsp, dialogLogger };
+  LOCAL_HOSTS, hostOf, watchRequests, EXPECTED_CSP, readCsp, dialogLogger, resetOrigin, freshState, cleanStart, markerOk, UPDNOTE_WATCH, updnoteSeen, NO_SHARE, CI_BLANK };

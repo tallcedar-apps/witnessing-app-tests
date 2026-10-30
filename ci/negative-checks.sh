@@ -28,7 +28,34 @@ fi
 ALL_CASES=(wrong-version add-imports-nothing any-file-can-replace one-safety-copy no-offline
   replace-skips-safety-copy csp-removed-outside-image count-checksum-check-removed old-not-downloadable
   tour-finish-adds-section tour-escape-finished tour-no-auto-open tour-old-later-message tour-help-button-missing
-  tour-answer-not-saved tour-opens-for-updaters)
+  tour-answer-not-saved tour-opens-for-updaters tour-no-resume tour-closed-no-message tour-elsewhere-ignored
+  backup-help-no-downloads false-update-note)
+
+# The check each broken copy MUST fail (text that has to appear in one of its FAIL lines). A broken copy that fails
+# only for some other reason (a crash, a busy port, another check) counts as CAUGHT-WRONG, which is a failure here.
+declare -A EXPECT=(
+  [wrong-version]='[1] one tap updates: "Updated to version 9.99'
+  [add-imports-nothing]='[12] Add: "Kept both versions'
+  [any-file-can-replace]='[12] a test-made fixture file: only "Add to my notes" is offered'
+  [one-safety-copy]='[14] once 3 safety copies are kept'
+  [no-offline]='[4] step finished without a crash  (page.reload: net::ERR_INTERNET_DISCONNECTED'
+  [replace-skips-safety-copy]='[13] Restore lists one safety copy "Before a replace"'
+  [csp-removed-outside-image]='[all] the app’s Content-Security-Policy is present and exactly as expected'
+  [count-checksum-check-removed]='[13b] (a) forged full backup with wrong section count'
+  [old-not-downloadable]='[1] the older version (0000000000000000000000000000000000000000) was fetched'
+  [tour-finish-adds-section]='finishing the tour leaves notes, backup record and safety copies unchanged'
+  [tour-escape-finished]='Escape closes it as skipped (not finished)'
+  [tour-no-auto-open]='a brand-new copy: the tour opens by itself on the main screen at "Step 1 of N"'
+  [tour-old-later-message]='] ... it says exactly "You can take the tour any time'
+  [tour-help-button-missing]='Help starts with a "🧭 Take the tour" button'
+  [tour-answer-not-saved]='... after a reload it does not open by itself again'
+  [tour-opens-for-updaters]='the tour does not appear for someone who already has notes'
+  [tour-no-resume]='the app closed on that step and opened again: the tour picks up at the backup step'
+  [tour-closed-no-message]='... and that open says once where the tour is: exactly'
+  [tour-elsewhere-ignored]='another window finished the tour: Next here closes it'
+  [backup-help-no-downloads]='... Help says "On this phone: each tap saves a backup file with today’s date to your Downloads.'
+  [false-update-note]='brand-new copy: the "New version ready" note never appeared'
+)
 if [ "$#" -gt 0 ]; then cases=("$@"); else cases=("${ALL_CASES[@]}"); fi
 
 version=${EXPECTED_VERSION:-$(grep -m1 -oE 'APP_VERSION = "[0-9]+(\.[0-9]+)+' "$app/index.html" | grep -oE '[0-9]+(\.[0-9]+)+$' || true)}
@@ -62,7 +89,20 @@ run_case() {
   fi
   node tests/serve.js "$dir" "$port" > "$out/$name.server.log" 2>&1 &
   spid=$!
-  sleep 1
+  # Make sure this case's own server is the one answering (a port already taken by something else must
+  # never let a broken copy count as "caught"): it must still be running and serve this case's index.html.
+  local up=0 t
+  for t in 1 2 3 4 5 6 7 8 9 10; do
+    sleep 1
+    kill -0 "$spid" 2> /dev/null || break
+    if curl -fsS "http://127.0.0.1:$port/witnessing-app/index.html" 2> /dev/null | cmp -s - "$dir/index.html"; then up=1; break; fi
+  done
+  if [ "$up" -ne 1 ]; then
+    echo "SERVER-FAILED: the test server for this case did not start on port $port (see $name.server.log)" >> "$log"
+    kill "$spid" 2> /dev/null || true
+    echo "$name SERVER-FAILED" > "$out/$name.result"
+    return
+  fi
   set +e
   ENGINE=chromium EXPECTED_VERSION="$exp" OLD_REF="$old" \
     APP_URL="http://localhost:$port/witnessing-app/" OUT="$out/$name" \
@@ -91,19 +131,28 @@ wait
 
 bad=0
 skipped=0
-printf '\n%-32s %-10s %s\n' "Broken copy" "Result" "First failing check"
+printf '\n%-32s %-12s %s\n' "Broken copy" "Result" "The failing check it had to hit (or the first FAIL line)"
 for name in "${cases[@]}"; do
   res=$(cut -d' ' -f2 "$out/$name.result" 2> /dev/null || echo MISSING)
-  first=$(grep -m1 -E '^\s*(✗|FAIL)' "$out/$name.log" 2> /dev/null | sed -E 's/^\s+//' | cut -c1-90 || true)
+  first=$(grep -m1 -E '^\s*(✗|FAIL)' "$out/$name.log" 2> /dev/null | sed -E 's/^\s+//' | cut -c1-100 || true)
+  want=${EXPECT[$name]:-}
+  hit=""
+  if [ -n "$want" ]; then
+    hit=$(grep -E '^\s*(✗|FAIL)' "$out/$name.log" 2> /dev/null | grep -m1 -F -- "$want" | sed -E 's/^\s+//' | cut -c1-100 || true)
+  fi
+  if [ "$res" = FAILED-GOOD ] && [ -z "$want" ]; then res=NO-EXPECTED-CHECK; fi
+  if [ "$res" = FAILED-GOOD ] && [ -z "$hit" ]; then
+    printf '%-32s %-12s %s\n' "$name" "CAUGHT-WRONG" "expected a FAIL line with: $want; first FAIL was: $first"; bad=1; continue
+  fi
   case "$res" in
-    FAILED-GOOD) printf '%-32s %-10s %s\n' "$name" "caught" "$first" ;;
-    NOT-APPLICABLE) printf '%-32s %-10s %s\n' "$name" "n/a" "$(tail -n 1 "$out/$name.log")"; skipped=$((skipped + 1)) ;;
-    PASSED-BAD) printf '%-32s %-10s %s\n' "$name" "MISSED" "(the checklist passed a broken app)"; bad=1 ;;
-    *) printf '%-32s %-10s %s\n' "$name" "$res" "see $out/$name.log"; bad=1 ;;
+    FAILED-GOOD) printf '%-32s %-12s %s\n' "$name" "caught" "$hit" ;;
+    NOT-APPLICABLE) printf '%-32s %-12s %s\n' "$name" "n/a" "$(tail -n 1 "$out/$name.log")"; skipped=$((skipped + 1)) ;;
+    PASSED-BAD) printf '%-32s %-12s %s\n' "$name" "MISSED" "(the checklist passed a broken app)"; bad=1 ;;
+    *) printf '%-32s %-12s %s\n' "$name" "$res" "see $out/$name.log"; bad=1 ;;
   esac
 done
 if [ "$bad" -eq 0 ]; then
-  echo "All $(( ${#cases[@]} - skipped )) broken copies that apply to this version were caught ($skipped not applicable)."
+  echo "All $(( ${#cases[@]} - skipped )) broken copies that apply to this version were caught by the check each one targets ($skipped not applicable)."
 else
   echo "Some broken copies were NOT caught." >&2
 fi

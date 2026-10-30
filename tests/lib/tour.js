@@ -59,7 +59,15 @@ async function dismissTourIfShown(page, rec){
 }
 
 // Full tour checks. env.fresh() gives a brand-new empty profile page; env.back(page) presses the phone's Back.
-async function openFresh(env){ const r = await env.fresh({ picker: env.picker }); await r.page.goto(env.base + '?cb=' + Date.now()); await r.page.waitForSelector('#app', { timeout: 20000 }); return r; }
+// A brand-new copy: a fresh start (env.fresh), then the app opened once. Records how long each part took (r.timing), and
+// watches the "New version ready" note (#updnote) from the first moment (H.UPDNOTE_WATCH).
+async function openFresh(env, o){
+  o = o || {}; const H = require('./helpers'); const t0 = Date.now();
+  const r = await env.fresh({ picker: o.picker === undefined ? env.picker : o.picker, share: o.share });
+  const t1 = Date.now(); await r.page.addInitScript(H.UPDNOTE_WATCH);
+  await r.page.goto(env.base + '?cb=' + Date.now()); await r.page.waitForSelector('#app', { timeout: 20000 });
+  r.timing = { freshStartMs: t1 - t0, openMs: Date.now() - t1 }; return r;
+}
 async function tourChecks(env, rec, version){
   const S = 'Tour (0.12+)';
   if (!require('./helpers').vge(version, TOUR_FROM)){ rec.skip(S, 'First-visit tour checks', 'app is version ' + version + '; the tour starts in ' + TOUR_FROM); return; }
@@ -178,9 +186,10 @@ function waitErrNote(rec, S, opened, where){
 async function noTourAfterReload(page){ await page.reload(); await page.waitForSelector('#app .row, #app .empty', { timeout: 20000 }); await page.waitForTimeout(2500); return !(await tourOpen(page)); }
 async function tour121Checks(env, rec, version){
   const S = 'Tour (0.12.1+)', H = require('./helpers');
+  const copy = (label, o) => newCopy(env, rec, S, label, o);
   // A. A brand-new copy: the tour opens by itself; walk it to Done; it never opens by itself again; Help > Take the tour replays it.
-  let { page, done } = await openFresh(env);
-  let opened = await waitAutoTour(page, 20000), werr = waitErrNote(rec, S, opened, 'brand-new copy'), t = await tourState(page), s = await stepInfo(page);
+  let { page, done, opened, werr } = await copy('brand-new copy');
+  let t = await tourState(page), s = await stepInfo(page);
   rec.check(S, 'a brand-new copy: the tour opens by itself on the main screen at "Step 1 of N" (state "offer", opened by itself)', opened && !!s && /^Step 1 of \d+$/.test(s.ind) && !!t && t.state === 'offer' && t.auto === true && await page.evaluate(() => location.hash === '#/' || location.hash === '' || location.hash === '#'), JSON.stringify(t) + ' ' + (s && s.ind) + werr);
   if (opened) await rec.shot(page, 'tour-auto-step-1');
   rec.check(S, '... there is no "New here?" card, no Start button, and no Take the tour on the main screen', await page.evaluate(() => !document.getElementById('tourCard') && !document.getElementById('tourLink') && !/New here\?|Take the tour|Start the tour/.test((document.getElementById('app') || {}).textContent || '')) && !(await page.getByRole('button', { name: /^Start the tour$/ }).count()));
@@ -211,8 +220,7 @@ async function tour121Checks(env, rec, version){
   }
   await done();
   // B. Skip tour on the tour that opened by itself; then the new main-screen layout.
-  ({ page, done } = await openFresh(env));
-  opened = await waitAutoTour(page, 20000); werr = waitErrNote(rec, S, opened, 'second brand-new copy'); before = await notesSnap(page);
+  ({ page, done, opened, werr } = await copy('second brand-new copy')); before = await notesSnap(page);
   if (!opened) rec.check(S, 'Skip tour (second brand-new copy): the tour opened by itself', false, JSON.stringify(await tourState(page)) + werr);
   else {
     await H.clearToasts(page); await tapTour(page, 'skip'); t = await tourState(page);
@@ -234,8 +242,7 @@ async function tour121Checks(env, rec, version){
   }
   await done();
   // C. The phone's Back on step 2 of the tour that opened by itself.
-  ({ page, done } = await openFresh(env));
-  opened = await waitAutoTour(page, 20000); werr = waitErrNote(rec, S, opened, 'third brand-new copy'); before = await notesSnap(page);
+  ({ page, done, opened, werr } = await copy('third brand-new copy')); before = await notesSnap(page);
   if (!opened) rec.check(S, 'phone Back (third brand-new copy): the tour opened by itself', false, JSON.stringify(await tourState(page)) + werr);
   else {
     await tapTour(page, 'next'); const s2 = await stepInfo(page);
@@ -247,8 +254,7 @@ async function tour121Checks(env, rec, version){
   }
   await done();
   // D. Escape (keyboard) on the tour that opened by itself.
-  ({ page, done } = await openFresh(env));
-  opened = await waitAutoTour(page, 20000); werr = waitErrNote(rec, S, opened, 'fourth brand-new copy');
+  ({ page, done, opened, werr } = await copy('fourth brand-new copy'));
   if (!opened) rec.check(S, 'Escape (fourth brand-new copy): the tour opened by itself', false, JSON.stringify(await tourState(page)) + werr);
   else {
     await H.clearToasts(page); await page.keyboard.press('Escape'); await page.waitForTimeout(500); t = await tourState(page);
@@ -258,6 +264,162 @@ async function tour121Checks(env, rec, version){
   }
   await done();
   // E. People who update never get it: checked in step 1 (notes made in the older version, then updated).
+  // Below: "the app closed and opened again" = this tab leaves the app (about:blank) and opens it again, with the
+  // same saved data (the app treats every page load as a new launch). These mirror the app's own tests (v121.js).
+  const LATER_RE = new RegExp('^' + LATER121.replace(/[.?]/g, '\\$&') + '$');
+  const reopen = async pg => { await pg.waitForTimeout(700); await pg.goto('about:blank'); await pg.waitForTimeout(300);
+    await pg.goto(env.base + '?cb=' + Date.now()); await pg.waitForSelector('#app .row, #app .empty', { timeout: 20000 }); };
+  const noLater = async pg => !(await H.toastSeen(pg, /take the tour any time/, 500));
+  // F. Closed while the tour (opened by itself) was on screen (v121 T6b / J4).
+  ({ page, done, opened, werr } = await copy('fifth brand-new copy (closed during the tour)'));
+  if (!opened) rec.check(S, 'closed during the tour (fifth brand-new copy): the tour opened by itself', false, JSON.stringify(await tourState(page)) + werr);
+  else {
+    await H.clearToasts(page); await reopen(page); await page.waitForTimeout(2500); t = await tourState(page);
+    rec.check(S, 'the app closed while the tour was open: the next open does not open it again; state done/skipped', !(await tourOpen(page)) && t.state === 'done' && t.how === 'skipped', JSON.stringify(t));
+    rec.check(S, '... and that open says once where the tour is: exactly "' + LATER121 + '"', await H.toastSeen(page, LATER_RE, 6000), JSON.stringify(await H.toastLog(page)));
+    await H.clearToasts(page); await reopen(page); await page.waitForTimeout(2500);
+    rec.check(S, '... the open after that: the message is not shown again and the tour stays closed', await noLater(page) && !(await tourOpen(page)), JSON.stringify(await H.toastLog(page)));
+  }
+  await done();
+  // G. Left on the add-to-home-screen step, opened again: the tour picks up at the backup step, once (v121 J1, judge 1).
+  ({ page, done, opened, werr } = await copy('sixth brand-new copy (left on the add-to-home-screen step)'));
+  if (!opened) rec.check(S, 'resume (sixth brand-new copy): the tour opened by itself', false, JSON.stringify(await tourState(page)) + werr);
+  else {
+    await tapTour(page, 'next'); const s2 = await stepInfo(page); t = await tourState(page);
+    const n = t.steps.length, bi = t.steps.indexOf('backup');
+    rec.check(S, 'reaching the add-to-home-screen step saves which step it is on (state "offer", opened by itself)', !!s2 && /^install-/.test(s2.key) && t.step === s2.key && t.state === 'offer' && t.auto, JSON.stringify(s2 && { key: s2.key, ind: s2.ind }) + ' ' + JSON.stringify(t));
+    await reopen(page); const re = await waitAutoTour(page, 15000), s3 = await stepInfo(page), t3 = await tourState(page);
+    rec.check(S, '... the app closed on that step and opened again: the tour picks up at the backup step ("Step ' + (bi + 1) + ' of ' + n + '"), not skipped', re && !!s3 && s3.key === 'backup' && s3.ind === 'Step ' + (bi + 1) + ' of ' + n && t3.state === 'offer' && t3.resumed, JSON.stringify(s3 && { key: s3.key, ind: s3.ind }) + ' ' + JSON.stringify(t3));
+    if (re){
+      await rec.shot(page, 'tour-resumed-at-backup');
+      await tapTour(page, 'next'); await tapTour(page, 'next'); await page.waitForTimeout(300); const t4 = await tourState(page);
+      rec.check(S, '... it goes on through the PDF step to Done: state done/finished', !(await tourOpen(page)) && t4.state === 'done' && t4.how === 'finished', JSON.stringify(t4));
+      await H.clearToasts(page); await reopen(page); await page.waitForTimeout(2500);
+      rec.check(S, '... and the next open: no tour, no message, still finished (shown once)', !(await tourOpen(page)) && (await tourState(page)).how === 'finished' && await noLater(page), JSON.stringify(await tourState(page)) + ' ' + JSON.stringify(await H.toastLog(page)));
+    }
+  }
+  await done();
+  // H. Resumed, ‹ Back to the add-to-home-screen step, closed again: no second resume (v121 J1, recheck 3).
+  ({ page, done, opened, werr } = await copy('seventh brand-new copy (resumed, then closed again)'));
+  if (!opened) rec.check(S, 'no second resume (seventh brand-new copy): the tour opened by itself', false, JSON.stringify(await tourState(page)) + werr);
+  else {
+    await tapTour(page, 'next'); await reopen(page); const re = await waitAutoTour(page, 15000); const s3 = await stepInfo(page);
+    if (re) await tapTour(page, 'back');
+    const sb = await stepInfo(page), tb = await tourState(page);
+    rec.check(S, 'resumed at the backup step; ‹ Back goes to the add-to-home-screen step (saved as the current step)', re && !!s3 && s3.key === 'backup' && !!sb && /^install-/.test(sb.key) && tb.step === sb.key && tb.resumed, JSON.stringify(s3 && s3.key) + ' ' + JSON.stringify(sb && sb.key) + ' ' + JSON.stringify(tb));
+    await H.clearToasts(page); await reopen(page); await page.waitForTimeout(2500); const t5 = await tourState(page);
+    rec.check(S, '... closed there and opened again: no second resume; state done/skipped, and exactly "' + LATER121 + '"', !(await tourOpen(page)) && t5.state === 'done' && t5.how === 'skipped' && await H.toastSeen(page, LATER_RE, 6000), JSON.stringify(t5) + ' ' + JSON.stringify(await H.toastLog(page)));
+    await H.clearToasts(page); await reopen(page); await page.waitForTimeout(2500);
+    rec.check(S, '... and the open after that: no tour and no message (once only)', !(await tourOpen(page)) && await noLater(page) && (await tourState(page)).how === 'skipped', JSON.stringify(await tourState(page)) + ' ' + JSON.stringify(await H.toastLog(page)));
+  }
+  await done();
+  // I. The tour was finished in another window (say, the installed app) while it is still open here (v121 J7).
+  let ctxI;
+  ({ page, done, opened, werr, ctx: ctxI } = await copy('eighth brand-new copy (finished in another window)'));
+  if (!opened) rec.check(S, 'done elsewhere (eighth brand-new copy): the tour opened by itself', false, JSON.stringify(await tourState(page)) + werr);
+  else {
+    const p2 = await (ctxI || page.context()).newPage();
+    await p2.goto(env.base + '#/help'); await p2.waitForSelector('#backHelp', { timeout: 20000 });
+    await p2.waitForFunction(() => window.__wa && window.__wa.spot.ready, null, { timeout: 20000 });
+    await p2.evaluate(() => { window.__wa.meta.tour = { state: 'done', how: 'finished', at: Date.now() }; return window.__wa.saveMeta(); });
+    await p2.waitForTimeout(300); await p2.close(); await page.bringToFront().catch(() => {});
+    await H.clearToasts(page); await tapTour(page, 'next'); await page.waitForTimeout(500); const t1 = await tourState(page);
+    rec.check(S, 'another window finished the tour: Next here closes it, keeps done/finished, and shows no message', !(await tourOpen(page)) && t1.state === 'done' && t1.how === 'finished' && await noLater(page), JSON.stringify(t1) + ' ' + JSON.stringify(await H.toastLog(page)));
+    await H.clearToasts(page); await reopen(page); await page.waitForTimeout(2500); const t2 = await tourState(page);
+    rec.check(S, '... after opening again: still finished, no tour, no message', !(await tourOpen(page)) && t2.how === 'finished' && await noLater(page), JSON.stringify(t2) + ' ' + JSON.stringify(await H.toastLog(page)));
+  }
+  await done();
+  // J. No file picker and no share sheet: Back up saves a dated file to Downloads, and the tour, the backup choices
+  //    screen and Help all say so (v121 J5, judge 5 + recheck 1).
+  const DL_NAME = 'no file picker and no share sheet: Back up saves to Downloads, and the tour, the backup choices screen and Help say so';
+  if (env.android) rec.skip(S, DL_NAME, 'checked in Chromium on Linux (the emulator\'s Chrome uses the stand-in share sheet)');
+  else if (env.engineLabel !== 'Chromium') rec.skip(S, DL_NAME, 'checked in Chromium (an iPhone always uses the share sheet)');
+  else {
+    ({ page, done, opened, werr } = await copy('ninth brand-new copy (no file picker, no share sheet)', { picker: false, share: false }));
+    const kind = await page.evaluate(() => ({ picker: typeof window.showSaveFilePicker, share: typeof navigator.share, canShare: typeof navigator.canShare }));
+    let tb = '';
+    if (opened){ for (let i = 0; i < 6; i++){ const x = await stepInfo(page); if (!x) break; if (x.key === 'backup'){ tb = await page.evaluate(() => document.querySelector('#modal.show .tbody').textContent.replace(/\s+/g, ' ').trim()); break; } await tapTour(page, 'next'); }
+      await tapTour(page, 'skip'); await page.waitForTimeout(300); }
+    rec.check(S, DL_NAME + ': the tour\'s backup step says "Each tap saves a backup file with today’s date to your Downloads."', opened && /Each tap saves a backup file with today’s date to your Downloads\./.test(tb) && !/share menu|Save to Files|asks where/.test(tb), tb.slice(0, 220) + ' ' + JSON.stringify(kind) + werr);
+    await page.goto(env.base + '#/backup'); await page.waitForSelector('#lastBackup', { timeout: 15000 }).catch(() => {});
+    const bp = await page.evaluate(() => ((document.getElementById('lastBackup') || {}).textContent || '').replace(/\s+/g, ' ').trim());
+    rec.check(S, '... the backup choices screen says "Saves a file with today’s date to your Downloads." (no share menu, no Save to Files)', /Saves a file with today’s date to your Downloads\./.test(bp) && !/share menu|Save to Files/.test(bp), bp);
+    await page.goto(env.base + '#/help'); await page.waitForSelector('#backHelp', { timeout: 15000 }).catch(() => {});
+    const hb = await page.evaluate(() => ((document.getElementById('backHelp') || {}).textContent || '').replace(/\s+/g, ' '));
+    rec.check(S, '... Help says "On this phone: each tap saves a backup file with today’s date to your Downloads. Then send it to Google Drive or email it to yourself, so a copy is kept off this phone."',
+      /On this phone: each tap saves a backup file with today’s date to your Downloads\. Then send it to Google Drive or email it to yourself, so a copy is kept off this phone\./.test(hb) && !/Save to Files|first time|share menu/.test(hb), hb.slice(0, 300));
+    await page.goto(env.base + '#/'); await page.waitForSelector('#bkbtn-home', { timeout: 15000 }).catch(() => {});
+    const today = await page.evaluate(() => { const d = new Date(); return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'); });
+    const [dl] = await Promise.all([page.waitForEvent('download', { timeout: 10000 }).catch(() => null), page.locator('#bkbtn-home').click().catch(() => {})]);
+    await page.waitForTimeout(500);
+    const txt = await page.evaluate(() => { const m = document.querySelector('#modal.show .sheet'); const t = document.getElementById('toast'); return ((m ? m.textContent : '') + ' ' + (t ? t.textContent : '')).replace(/\s+/g, ' ').trim(); });
+    const shared = await page.evaluate(() => sessionStorage.__ciShared || '[]');
+    const fname = dl ? dl.suggestedFilename() : '';
+    rec.check(S, '... Back up really downloads a file named with today’s date (witnessing-notes-backup-<date>.witness.json), with no share sheet, and says it is in Downloads', fname === 'witnessing-notes-backup-' + today + '.witness.json' && /Downloads/.test(txt) && shared === '[]', (fname || 'no download') + ' (today ' + today + ') || ' + txt.slice(0, 200) + ' || shared ' + shared.slice(0, 80));
+    if (dl) await rec.shot(page, 'backup-downloads');
+    await done();
+  }
+  // K. WebKit only (unless TOUR_LOOP is set): many brand-new copies in a row, expecting 0 misses (the run-C app bug).
+  const loopN = process.env.TOUR_LOOP !== undefined && process.env.TOUR_LOOP !== '' ? +process.env.TOUR_LOOP : (env.engineLabel === 'WebKit' ? 30 : 0);
+  if (loopN > 0) await freshLoop(env, rec, loopN);
 }
 
-module.exports = { TOUR, TOUR_FROM, TOUR121_FROM, LATER121, tourBox, waitTourBox, dismissTourIfShown, tourChecks, tour121Checks, tourOpen, tourState };
+// One brand-new copy for the 0.12.1 tour checks. Checks the app's own saved state right after it opens (tour state
+// exactly "offer" with no autoAt unless the tour is already on screen, IndexedDB storage, no save spot), waits for the
+// tour to open by itself, checks the "New version ready" note never showed, and if the tour did NOT open, collects
+// diagnostics (screenshot, #updnote / #banner / #toast, document.hidden, focus, route, meta.tour, timings).
+async function newCopy(env, rec, S, label, o){
+  const H = require('./helpers');
+  const r = await openFresh(env, o);
+  // #app shows before the app has finished starting (opening its storage, setting meta.tour), so wait for that first.
+  // A copy that never gets there leaves raw null and the row below FAILS (up to 20 s; never extended).
+  await r.page.waitForFunction(() => { const w = window.__wa; return !!(w && w.meta && w.meta.tour); }, null, { timeout: 20000 }).catch(() => {});
+  const st = await r.page.evaluate(() => { const w = window.__wa; const mt = w && w.meta && w.meta.tour;
+    return { raw: mt ? JSON.parse(JSON.stringify(mt)) : null, open: !!document.querySelector('#modal.show .sheet.tour') || !!(w && w.tour && w.tour.open), mode: w && w.tour && w.tour.mode, handle: !!(w && w.spot && w.spot.handle) }; }).catch(e => ({ error: e.message }));
+  const keys = st.raw ? Object.keys(st.raw).sort().join(',') : '';
+  rec.check(S, label + ': the app starts with nothing saved: tour state exactly "offer" with no autoAt (unless the tour is already on screen), notes kept in IndexedDB, no save spot',
+    !!st.raw && st.raw.state === 'offer' && (keys === 'state' || (st.open && keys === 'autoAt,state,step')) && st.mode === 'idb' && !st.handle, JSON.stringify(st));
+  const w0 = Date.now(); const opened = await waitAutoTour(r.page, 20000); const waitMs = Date.now() - w0;
+  let werr = waitErrNote(rec, S, opened, label);
+  const upd = await H.updnoteSeen(r.page);
+  rec.check(S, label + ': the "New version ready" note never appeared', upd.length === 0, JSON.stringify(upd));
+  if (!opened) werr += ' DIAGNOSTICS ' + await missDiag(r.page, rec, label, r, waitMs);
+  return { page: r.page, done: r.done, ctx: r.ctx, opened, werr };
+}
+async function missDiag(page, rec, label, r, waitMs){
+  const H = require('./helpers');
+  await rec.shot(page, 'tour-miss-' + label.replace(/[^a-z0-9]+/gi, '-').slice(0, 40)).catch(() => {});
+  const d = await page.evaluate(() => { const g = id => document.getElementById(id), tx = e => ((e && e.textContent) || '').replace(/\s+/g, ' ').trim().slice(0, 100);
+    const u = g('updnote'), b = g('banner'), t = g('toast'), m = g('modal'), a = document.activeElement, w = window.__wa;
+    return { updnote: u ? { hidden: u.hidden, text: tx(u) } : null, banner: b ? { show: b.classList.contains('show'), text: tx(b) } : null,
+      toast: t ? { show: t.classList.contains('show'), text: tx(t) } : null, modal: m ? { show: m.classList.contains('show'), text: tx(m) } : null,
+      documentHidden: document.hidden, visibility: document.visibilityState, activeElement: a ? a.tagName + (a.id ? '#' + a.id : '') : null, route: location.hash,
+      metaTour: w && w.meta ? w.meta.tour : null, spotReady: !!(w && w.spot && w.spot.ready), storeMode: w && w.tour && w.tour.mode,
+      swController: !!(navigator.serviceWorker && navigator.serviceWorker.controller), touring: document.documentElement.classList.contains('touring') }; }).catch(e => ({ error: e.message }));
+  d.updnoteLog = await H.updnoteSeen(page); d.timing = Object.assign({}, r.timing || {}, { waitForTourMs: waitMs });
+  const s = JSON.stringify(d);
+  rec.note('the tour did not open by itself (' + label + '): ' + s);
+  return s;
+}
+// Many brand-new copies in a row (each a full fresh start): the tour must open by itself EVERY time, and the
+// "New version ready" note must never show. On 0.12.1 this is expected to fail now and then in WebKit (the run-C app
+// bug: the first install's state change sees a controller and shows the update note, which blocks the tour).
+async function freshLoop(env, rec, n){
+  const S = 'Tour fresh-copy loop', H = require('./helpers');
+  const misses = [], notes = [], errs = []; const t0 = Date.now();
+  for (let i = 1; i <= n; i++){
+    let r = null;
+    try {
+      r = await openFresh(env); const w0 = Date.now(); const opened = await waitAutoTour(r.page, 20000); const waitMs = Date.now() - w0;
+      const upd = await H.updnoteSeen(r.page);
+      if (upd.length) notes.push('#' + i + ' ' + JSON.stringify(upd));
+      if (!opened) misses.push('#' + i + ' ' + (await missDiag(r.page, rec, 'loop ' + i, r, waitMs)).slice(0, 700));
+    } catch (e) { errs.push('#' + i + ' ' + String(e && e.message || e).split('\n')[0].slice(0, 200)); }
+    finally { if (r) await r.done().catch(() => {}); }
+  }
+  rec.note(S + ': ' + n + ' brand-new copies in ' + ((Date.now() - t0) / 1000).toFixed(0) + ' s; misses ' + misses.length + ', update notes ' + notes.length + ', errors ' + errs.length);
+  rec.check(S, n + ' brand-new copies in a row: the tour opened by itself every time (0 misses)', misses.length === 0 && errs.length === 0, 'misses ' + misses.length + '/' + n + (misses.length ? ': ' + misses.join(' | ') : '') + (errs.length ? '; errors: ' + errs.join(' | ') : ''));
+  rec.check(S, '... and the "New version ready" note never appeared on any of them', notes.length === 0, notes.length + '/' + n + (notes.length ? ': ' + notes.join(' | ') : ''));
+}
+
+module.exports = { TOUR, TOUR_FROM, TOUR121_FROM, LATER121, tourBox, waitTourBox, dismissTourIfShown, tourChecks, tour121Checks, tourOpen, tourState, freshLoop };

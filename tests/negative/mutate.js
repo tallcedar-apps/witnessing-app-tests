@@ -71,6 +71,27 @@ const CASES = {
     ['index.html', 'if (hasOwnNotes()){ setTour("ignored"); return false; }', ''],
     ['index.html', 'meta.tour && meta.tour.state === "offer") setTour("upgrade");', 'false) setTour("upgrade");'],
   ],
+  // Judge review 3 (v121 J1): a tour left on the add-to-home-screen step never picks up again at the backup step.
+  'tour-no-resume': [
+    ['index.html', 'function tourResumeKey(){ var t = meta.tour;', 'function tourResumeKey(){ return ""; var t = meta.tour;'],
+  ],
+  // Judge review 3 (v121 T6b/J4): closed during the tour, the next open no longer says where the tour is.
+  'tour-closed-no-message': [
+    ['index.html', 'setTimeout(tourLaterMsg, 0); ', ''],
+  ],
+  // Judge review 3 (v121 J7): an answer given in another window is ignored; Next carries on the old tour.
+  'tour-elsewhere-ignored': [
+    ['index.html', 'if (sm && sm.tour && sm.tour.state === "done"){ meta.tour = sm.tour; offer = false; close("elsewhere"); return; }', ''],
+  ],
+  // Judge review 3 (Downloads wording): Help no longer says the backup goes to Downloads.
+  'backup-help-no-downloads': [
+    ['index.html', 'to your Downloads. Then send it', 'to your phone. Then send it'],
+  ],
+  // Judge review 1 (the run-C app bug, made certain): the very first service worker install shows the
+  // "New version ready" note on a brand-new copy.
+  'false-update-note': [
+    ['index.html', 'if (w.state === "installed" && navigator.serviceWorker.controller) offerUpdate(w);', 'if (w.state === "installed") offerUpdate(w);'],
+  ],
   // Android emulator only (ci/android-checks.sh): the app itself crashes the page. 1.5 s after the version under
   // test opens, it allocates memory without end until Chrome kills the page ("Aw, Snap! Out of memory"). In step 1
   // that happens right after "tap to update". Proves an app-caused crash FAILS and is never retried.
@@ -88,7 +109,8 @@ const CASES = {
 
 const edits = CASES[name];
 const FROM = { 'tour-finish-adds-section': '0.12', 'tour-escape-finished': '0.12.1', 'tour-no-auto-open': '0.12.1', 'tour-old-later-message': '0.12.1',
-  'tour-help-button-missing': '0.12.1', 'tour-answer-not-saved': '0.12.1', 'tour-opens-for-updaters': '0.12.1' };
+  'tour-help-button-missing': '0.12.1', 'tour-answer-not-saved': '0.12.1', 'tour-opens-for-updaters': '0.12.1',
+  'tour-no-resume': '0.12.1', 'tour-closed-no-message': '0.12.1', 'tour-elsewhere-ignored': '0.12.1', 'backup-help-no-downloads': '0.12.1', 'false-update-note': '0.12.1' };
 if (!edits) {
   console.error('Unknown case: ' + name + '. Known: ' + Object.keys(CASES).join(', '));
   process.exit(64);
