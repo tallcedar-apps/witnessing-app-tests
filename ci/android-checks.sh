@@ -38,6 +38,18 @@ adb logcat -c || true
 # Test setup only: time limits so a dead emulator ("device offline") ends the step instead of hanging the job.
 status=0
 APP_URL="http://localhost:$port/witnessing-app/" OUT="$out" timeout 40m node tests/run-android.js || status=$?
+# Diagnostics only: if the emulator vanished ("device offline"), record whether its program is still running,
+# the runner's memory, and any crash or out-of-memory lines from the runner's kernel log.
+emu_gone=0
+if [[ "$(timeout 10 adb get-state 2>/dev/null)" != "device" ]]; then
+  emu_gone=1
+  { echo "adb get-state: $(timeout 10 adb get-state 2>&1)"
+    pgrep -fa 'qemu-system|emulator' | cut -c1-200 || echo "The emulator program is no longer running (it crashed or was stopped)."
+    free -m
+    sudo -n dmesg -T 2>/dev/null | grep -iE 'oom|killed process|segfault|qemu|general protection|traps:' | tail -30
+  } 2>&1 | tee "$out/emulator-gone.txt"
+  echo "::warning::The Android emulator stopped responding during the checks (see $out/emulator-gone.txt)."
+fi
 # Every counted warning (for example a retried step) also shows as a GitHub warning on the run page.
 node -e '
 const r = JSON.parse(require("fs").readFileSync(process.argv[1] + "/results.json", "utf8"));
@@ -54,7 +66,9 @@ timeout 60 adb logcat -d -b main,system,crash,events -v time > "$out/logcat-full
 neg_port="${NEG_PORT:-8932}"; neg_out="${out}-neg-crash"; mkdir -p "$neg_out"
 if [[ "$neg_port" == "8765" ]]; then echo "::error::Port 8765 is not allowed for this project."; exit 2; fi
 neg_ok=0
-if node tests/negative/mutate.js "${APP_DIR:-app}" /tmp/app-neg-crash crash-page > "$neg_out/build.log" 2>&1; then
+if [[ "$emu_gone" == 1 ]]; then
+  echo "NEGATIVE CHECK COULD NOT RUN: the emulator is gone." | tee "$neg_out/verdict.txt"
+elif node tests/negative/mutate.js "${APP_DIR:-app}" /tmp/app-neg-crash crash-page > "$neg_out/build.log" 2>&1; then
   nohup node tests/serve.js /tmp/app-neg-crash "$neg_port" > "$neg_out/server.log" 2>&1 &
   neg_server=$!
   for _ in $(seq 1 30); do curl -fsS -o /dev/null "http://127.0.0.1:$neg_port/witnessing-app/" && break; sleep 1; done
@@ -82,7 +96,8 @@ if [[ "$neg_ok" == 1 ]]; then
   echo "NEGATIVE CHECK PASSED: the page crash made step 1 FAIL, and it was not retried." | tee -a "$neg_out/verdict.txt"
   [[ -n "${GITHUB_STEP_SUMMARY:-}" ]] && echo -e "\n✅ Negative check: a copy of the app that crashes the page FAILS step 1 and is not retried.\n" >> "$GITHUB_STEP_SUMMARY"
 else
-  echo "::error::NEGATIVE CHECK FAILED: a copy of the app that crashes the page did not fail step 1 cleanly (see $neg_out)."
+  if [[ "$emu_gone" == 1 ]]; then echo "::error::NEGATIVE CHECK NOT RUN: the emulator stopped before it could run."
+  else echo "::error::NEGATIVE CHECK FAILED: a copy of the app that crashes the page did not fail step 1 cleanly (see $neg_out)."; fi
   [[ -n "${GITHUB_STEP_SUMMARY:-}" ]] && echo -e "\n❌ Negative check: the crashing copy of the app was not caught as a clean step-1 failure.\n" >> "$GITHUB_STEP_SUMMARY"
   [[ "$status" == 0 ]] && status=1
 fi
