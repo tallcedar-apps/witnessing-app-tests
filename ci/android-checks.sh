@@ -22,6 +22,9 @@ if ! adb shell pm list packages com.android.chrome | tr -d '\r' | grep -q '^pack
 fi
 # Let Chrome read its command-line file (needed for automation on a non-rooted build).
 adb shell am set-debug-app --persistent com.android.chrome || true
+# Emulator setup only: don't let system "isn't responding" dialogs (seen: Pixel Launcher) cover Chrome.
+adb shell settings put global hide_error_dialogs 1 || true
+adb shell settings put secure anr_show_background 0 || true
 # Make sure the emulator starts online. (Playwright itself skips Chrome's first-run screens.)
 adb shell cmd connectivity airplane-mode disable || true
 # The emulator's "localhost:$port" now means the runner's local test server.

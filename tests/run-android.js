@@ -37,6 +37,9 @@ const reverseOff = () => { try { adb('reverse', '--remove', 'tcp:' + PORT); } ca
       if (ctx) { await ctx.close().catch(() => {}); ctx = null; }
       // A fresh, empty Chrome profile: wipes only the emulator's Chrome data (made-up test data only).
       await device.shell('pm clear ' + CHROME);
+      // Emulator setup only: allow Chrome's notifications up front so Chrome's own "Chrome notifications make
+      // things easier" sheet doesn't cover the page and swallow the Back key. (The app never uses notifications.)
+      await device.shell('pm grant ' + CHROME + ' android.permission.POST_NOTIFICATIONS').catch(() => {});
       ctx = await device.launchBrowser({ pkg: CHROME });
       await H.watchRequests(ctx, env.outside, env.allowedHosts);   // any request to another site fails the run
       await ctx.addInitScript(H.TOAST_LOG); await ctx.addInitScript(H.SHARE_MOCK); await ctx.addInitScript(H.PRINT_STUB);
