@@ -188,13 +188,42 @@ jobs:
           # (Run 6, with Vulkan off, still lost the emulator once, during the negative check; so this is not proven to help.)
           emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none -no-snapshot -feature -Vulkan
           script: bash ci/android-checks.sh
+      # Only when the emulator PROGRAM itself vanished mid-run (results/android/emulator-gone.txt exists; never for an
+      # ordinary FAIL): run the whole checklist once more on a brand-new emulator. Every check runs again and must
+      # pass; the run page shows a warning, and the first try's results stay in the artifacts (results/android).
+      - name: Retry once on a new emulator — only because the emulator program itself vanished
+        id: emu_retry
+        if: ${{ !cancelled() && steps.emu.outcome == 'failure' && hashFiles('results/android/emulator-gone.txt') != '' && hashFiles('results/android-chrome-missing.txt') == '' }}
+        continue-on-error: true   # the "Result" step below decides
+        uses: ReactiveCircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2.38.0
+        env:
+          EXPECTED_VERSION: ${{ steps.ver.outputs.version }}
+          ANDROID_IMAGE: google_apis
+          ANDROID_OUT: results/android-retry
+        with:
+          api-level: 34
+          target: google_apis
+          arch: x86_64
+          profile: pixel_6
+          force-avd-creation: true
+          disable-animations: true
+          ram-size: 4096M
+          heap-size: 576M
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none -no-snapshot -feature -Vulkan
+          script: bash ci/android-checks.sh
       - name: Result of the Android checks
         if: ${{ !cancelled() }}
         env:
           EMU: ${{ steps.emu.outcome }}
           FALLBACK: ${{ steps.emu_playstore.outcome }}
+          RETRY: ${{ steps.emu_retry.outcome }}
         run: |
           if [[ "$EMU" == "success" ]]; then echo "Android checks passed on google_apis."; exit 0; fi
+          if [[ -f results/android/emulator-gone.txt && ! -f results/android-chrome-missing.txt ]]; then
+            echo "::warning::The Android emulator program vanished during the first try (see results/android/emulator-gone.txt); the whole checklist was run again on a new emulator."
+            if [[ "$RETRY" == "success" ]]; then echo "Android checks passed on the second, new emulator (all checks re-run)."; exit 0; fi
+            echo "::error::Android checks failed on the second emulator too ($RETRY)."; exit 1
+          fi
           if [[ -f results/android-chrome-missing.txt ]]; then
             echo "::warning::Chrome was missing on google_apis; used google_apis_playstore instead."
             if [[ "$FALLBACK" == "success" ]]; then echo "Android checks passed on google_apis_playstore."; exit 0; fi
@@ -204,7 +233,7 @@ jobs:
       - name: Save the emulator's own crash files (only if something failed)
         # Diagnostics only: the emulator's crash report folder (emu-crash-*.db, with any minidumps) and its network
         # helper's logs. The emulator's own printed output is in this job's log (lines starting INFO / WARNING / ERROR).
-        if: ${{ !cancelled() && (steps.emu.outcome == 'failure' || steps.emu_playstore.outcome == 'failure') }}
+        if: ${{ !cancelled() && (steps.emu.outcome == 'failure' || steps.emu_playstore.outcome == 'failure' || steps.emu_retry.outcome == 'failure') }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: android-emulator-files
