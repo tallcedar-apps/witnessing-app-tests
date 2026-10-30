@@ -18,6 +18,7 @@ that code, not whatever happens to be live. A separate, read-only check then ope
 |---|---|---|
 | Chromium and WebKit at phone size | Linux | Playwright's Chromium (Android size) and Playwright's WebKit (iPhone size). WebKit is the engine inside Safari, **but it is not real Safari**. |
 | Real Chrome in the Android emulator | Linux with hardware speed-up (KVM) | Real Chrome on an emulated Android phone (Android 14, `google_apis` image). The phone reaches the test copy through `adb reverse`. If that image ever lacks Chrome, the job retries once on the `google_apis_playstore` image and shows a warning. |
+| Negative check: a page-crashing copy of the app (own Android emulator) | Linux with KVM | Its own job and its own fresh emulator. It builds a copy of the app that crashes the page on purpose and runs step 1 once, with no retry. The job passes only if Chrome reports the page crash and step 1 FAILS, with no emulator or adb trouble. This proves an app-caused crash cannot slip through as a pass or a "system" retry. |
 | iPhone checks | macOS | Playwright WebKit with iPhone settings (**WebKit, not real Safari**), plus real Mobile Safari in the iOS Simulator (**screenshots only, not checked**). An experimental extra step drives the Simulator's Safari with safaridriver; it **does not affect pass/fail**, and if it fails the run shows a yellow warning. |
 | Live site smoke check | Linux | Opens the live site in fresh, empty browsers. It checks that the page loads, shows the expected version, and reopens with no internet. It never types or saves anything. |
 

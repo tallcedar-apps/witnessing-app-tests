@@ -195,6 +195,16 @@ jobs:
             echo "::error::Android checks failed on google_apis_playstore ($FALLBACK)."; exit 1
           fi
           echo "::error::Android checks failed on google_apis ($EMU)."; exit 1
+      - name: Save the emulator's own crash files (only if something failed)
+        # Diagnostics only: the emulator's crash report folder (emu-crash-*.db, with any minidumps) and its network
+        # helper's logs. The emulator's own printed output is in this job's log (lines starting INFO / WARNING / ERROR).
+        if: ${{ !cancelled() && (steps.emu.outcome == 'failure' || steps.emu_playstore.outcome == 'failure') }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: android-emulator-files
+          path: /tmp/android-runner/
+          retention-days: 7
+          if-no-files-found: ignore
       - name: Save screenshots and test files
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -204,10 +214,83 @@ jobs:
           retention-days: 7
           if-no-files-found: ignore
 
+  android-negative-crash:
+    name: Negative check — a page-crashing copy of the app must FAIL (own Android emulator)
+    # Its own job with its own fresh emulator, so it can't disturb (or be disturbed by) the main Android checks.
+    # Not retried: one try only, and it passes only when a page crash is seen with no emulator or adb trouble.
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check the inputs
+        # Typed-in inputs reach scripts only through env. Reject anything that isn't a plain ref or version number.
+        run: |
+          [[ "$APP_REF" =~ ^[A-Za-z0-9._/-]{1,100}$ && "$APP_REF" != -* && "$APP_REF" != *..* ]] || { echo "::error::Bad app_ref (letters, digits, . _ / - only, up to 100)"; exit 1; }
+          [[ -z "$EXPECTED_INPUT" || "$EXPECTED_INPUT" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]] || { echo "::error::Bad expected_version (like 0.12 or 0.12.1, or empty)"; exit 1; }
+      - name: Get the tests
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Get the app (${{ env.APP_REF }})
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ env.APP_REPO }}
+          ref: ${{ env.APP_REF }}
+          path: app
+          persist-credentials: false
+      - name: Check the app version
+        id: ver
+        run: bash ci/app-version.sh app "$EXPECTED_INPUT"
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install Playwright (no browsers needed; it drives the emulator's Chrome)
+        run: npm ci
+      - name: Start the local test server
+        run: bash ci/start-server.sh app "$APP_PORT"
+      - name: Turn on hardware speed-up for the emulator (KVM)
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+      - name: Negative check in the Android emulator's Chrome (google_apis image)
+        uses: ReactiveCircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2.38.0
+        env:
+          EXPECTED_VERSION: ${{ steps.ver.outputs.version }}
+          ANDROID_IMAGE: google_apis
+          ANDROID_OUT: results/android-neg-crash
+          NEG_PORT: "8932"
+        with:
+          api-level: 34
+          target: google_apis
+          arch: x86_64
+          profile: pixel_6
+          force-avd-creation: true
+          disable-animations: true
+          ram-size: 4096M
+          heap-size: 576M
+          # Same emulator settings as the main Android job (see the comment there).
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none -no-snapshot -feature -Vulkan
+          script: bash ci/android-checks.sh negative
+      - name: Save the emulator's own crash files (only if something failed)
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: android-neg-crash-emulator-files
+          path: /tmp/android-runner/
+          retention-days: 7
+          if-no-files-found: ignore
+      - name: Save screenshots and test files
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: android-neg-crash
+          path: results/
+          retention-days: 7
+          if-no-files-found: ignore
+
   iphone-simulator:
     name: iPhone checks (macOS) — WebKit, plus real Safari in the iOS Simulator
     runs-on: macos-15
-    timeout-minutes: 25
+    timeout-minutes: 30
     steps:
       - name: Check the inputs
         # Typed-in inputs reach scripts only through env. Reject anything that isn't a plain ref or version number.
@@ -238,8 +321,6 @@ jobs:
           npx playwright install webkit
       - name: Start the local test server
         run: bash ci/start-server.sh app "$APP_PORT"
-      - name: Start booting an iPhone in the iOS Simulator (it finishes while the WebKit checks run)
-        run: bash ci/ios-simulator.sh boot
       - name: Checklist in WebKit with iPhone settings (WebKit, not real Safari)
         env:
           ENGINE: webkit
@@ -247,11 +328,17 @@ jobs:
           APP_URL: http://localhost:${{ env.APP_PORT }}/witnessing-app/
           OUT: results/webkit-iphone
         run: node tests/run-browser.js
+      # Test setup only: the Simulator now boots AFTER the WebKit checklist, not during it. In run 41003637168 the
+      # WebKit step-1 tap timed out while the Simulator was booting on the same machine (cause not proven).
+      - name: Boot an iPhone in the iOS Simulator (after the WebKit checks, so they don't share the machine with a boot)
+        if: ${{ !cancelled() }}
+        continue-on-error: true   # screenshots only; the open step below warns if Safari can't be reached
+        run: bash ci/ios-simulator.sh boot
       - name: Open in the iPhone simulator's Safari (screenshots only, not checked)
         id: simopen
         if: ${{ !cancelled() }}
         continue-on-error: true   # screenshots only; a failure here shows as a warning below, not a failed job
-        timeout-minutes: 4
+        timeout-minutes: 8   # includes waiting for the boot to finish
         run: bash ci/ios-simulator.sh open
       - name: Warn if the Simulator screenshots are missing
         if: ${{ always() && steps.simopen.outcome == 'failure' }}

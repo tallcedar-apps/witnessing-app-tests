@@ -69,7 +69,28 @@ async function backupFile(page, env){ // latest full backup as {name,text}
 async function runChecklist(env, rec){
   const errors = [];
   const V = env.expectedVersion;
-  const step = async (label, fn) => { try { await fn(); } catch (e) { rec.check(label, 'step finished without a crash', false, e.message.split('\n')[0]); if (env.mainPage) { await rec.shot(env.mainPage, 'crash-' + label.replace(/\W+/g, '-')); await recover(env.mainPage, env); } } };
+  const step = async (label, fn) => { try { await fn(); } catch (e) { rec.check(label, 'step finished without a crash', false, e.message.split('\n')[0]); await stepDiag(label, e); if (env.mainPage) { await rec.shot(env.mainPage, 'crash-' + label.replace(/\W+/g, '-')); await recover(env.mainPage, env); } } };
+  // Diagnostics only (no pass/fail): when a step fails, keep the browser's own explanation (Playwright's call log,
+  // e.g. "element is not visible" or "<div> intercepts pointer events"), what the page shows, and a screenshot of
+  // the page the step was using, even before the main page exists (step 1 has its own page).
+  const stepDiag = async (label, e) => {
+    try {
+      const callLog = String(e && e.message || '').split('\n').slice(1).map(x => x.trim()).filter(Boolean).slice(0, 12).join(' | ');
+      if (callLog) rec.note('[' + label + '] failure details: ' + callLog.slice(0, 1500));
+      const p = env.diagPage;
+      if (p && !p.isClosed()){
+        const st = await Promise.race([p.evaluate(() => {
+          const vis = el => !!el && !el.hidden && getComputedStyle(el).display !== 'none' && getComputedStyle(el).visibility !== 'hidden';
+          const m = document.querySelector('#modal');
+          const btns = [...document.querySelectorAll('button')].filter(b => /New section/.test(b.textContent)).map(b => (vis(b) ? 'visible' : 'hidden') + (b.disabled ? ',disabled' : ''));
+          return 'url=' + location.pathname + location.hash + '; readyState=' + document.readyState + '; modal=' + (m ? (m.className || '(no class)') : 'none') +
+            '; "New section" buttons=' + (btns.join('/') || 'none') + '; dialogs open=' + document.querySelectorAll('dialog[open]').length;
+        }), new Promise(r => setTimeout(() => r('page did not answer within 5 s'), 5000))]);
+        rec.note('[' + label + '] page state at failure: ' + st);
+        await Promise.race([rec.shot(p, 'failed-step-' + label.replace(/\W+/g, '-')), new Promise(r => setTimeout(r, 10000))]);
+      }
+    } catch (d) { rec.note('[' + label + '] failure details could not be read: ' + String(d && d.message || d).split('\n')[0]); }
+  };
 
   // ---------- Step 1: update banner from an older version (on fresh data) ----------
   const step1 = async () => {
@@ -80,6 +101,7 @@ async function runChecklist(env, rec){
       return;
     }
     const { page, done } = await env.fresh({ picker: false });
+    env.diagPage = page;  // diagnostics only (see stepDiag)
     attachLog(page, errors, 'update');
     const base = env.base;
     // The local test server serves the older index.html and sw.js until told to stop (see tests/serve.js).
@@ -132,6 +154,7 @@ async function runChecklist(env, rec){
     }
   });
 
+  env.diagPage = null;
   if (env.oldFiles) await H.serveOld(env.base, null).catch(() => {}); // always back to the version under test
   // Negative check only (tests/neg-android-crash): stop after step 1. Never set in a normal run.
   if (env.stopAfterStep1) { rec.note('stopping after step 1 (negative check only)'); return; }

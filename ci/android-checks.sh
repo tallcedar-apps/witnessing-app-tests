@@ -5,6 +5,9 @@
 # Exit codes: 0 all passed, 1 a check failed, 2 bad setup, 3 Chrome is missing on this system image
 # (the workflow then retries once on the google_apis_playstore image).
 set -uo pipefail
+# Mode: "main" (default) runs the checklist; "negative" runs ONLY the crash-on-purpose negative check, in its own job
+# with its own fresh emulator, so neither can disturb the other.
+mode="${1:-main}"
 port="${APP_PORT:-8931}"
 out="${ANDROID_OUT:-results/android}"
 mkdir -p "$out"
@@ -35,6 +38,21 @@ bash ci/android-settle.sh "before the tests" | tee "$out/settle-wait.txt"
 # Diagnostics only: keep the start-up part of the system log, then start a clean log for the tests.
 timeout 60 adb logcat -d -b main,system,crash,events -v time > "$out/logcat-boot.txt" 2>&1 || true
 adb logcat -c || true
+# Diagnostics only: stream the whole system log to a file as it happens, so the last lines before an emulator
+# crash are kept even when "adb logcat -d" can no longer reach the emulator.
+adb logcat -v epoch -b main,system,crash,events > "$out/logcat-stream.txt" 2>&1 &
+logcat_stream=$!
+# Diagnostics only: what the runner knows when the emulator vanished ("device offline").
+emu_gone_report(){  # $1 = file to write
+  { echo "adb get-state: $(timeout 10 adb get-state 2>&1)"
+    pgrep -fa 'qemu-system|emulator64|/emulator ' | cut -c1-200 || echo "The emulator program is no longer running (it crashed or was stopped)."
+    free -m
+    echo "--- kernel log (last 80 lines):"; sudo -n dmesg -T 2>&1 | tail -80
+    echo "--- /tmp/android-runner:"; ls -laR /tmp/android-runner 2>/dev/null | head -80
+  } > "$1" 2>&1
+  cat "$1"
+}
+if [[ "$mode" == "main" ]]; then
 # Test setup only: time limits so a dead emulator ("device offline") ends the step instead of hanging the job.
 status=0
 APP_URL="http://localhost:$port/witnessing-app/" OUT="$out" timeout 40m node tests/run-android.js || status=$?
@@ -43,12 +61,7 @@ APP_URL="http://localhost:$port/witnessing-app/" OUT="$out" timeout 40m node tes
 emu_gone=0
 if [[ "$(timeout 10 adb get-state 2>/dev/null)" != "device" ]]; then
   emu_gone=1
-  { echo "adb get-state: $(timeout 10 adb get-state 2>&1)"
-    pgrep -fa 'qemu-system|emulator' | cut -c1-200 || echo "The emulator program is no longer running (it crashed or was stopped)."
-    free -m
-    sudo -n dmesg -T 2>/dev/null | grep -iE 'oom|killed process|segfault|qemu|general protection|traps:' | tail -30
-    ls -la /tmp/android-runner 2>/dev/null
-  } 2>&1 | tee "$out/emulator-gone.txt"
+  emu_gone_report "$out/emulator-gone.txt"
   echo "::warning::The Android emulator stopped responding during the checks (see $out/emulator-gone.txt)."
 fi
 # Every counted warning (for example a retried step) also shows as a GitHub warning on the run page.
@@ -61,10 +74,15 @@ timeout 60 adb logcat -d -s chromium:V cr_*:V AndroidRuntime:E '*:F' > "$out/log
 # Diagnostics only: the whole system log too (app crashes, low-memory kills, activity changes; made-up test data only).
 timeout 60 adb logcat -d -b main,system,crash,events -v time > "$out/logcat-full.txt" 2>&1 || true
 
+fi  # end of main mode
+
+if [[ "$mode" == "negative" ]]; then
+status=0; emu_gone=0
+if [[ "$(timeout 10 adb get-state 2>/dev/null)" != "device" ]]; then emu_gone=1; emu_gone_report "$out/emulator-gone.txt"; fi
 # ---------- Negative check: the app itself crashes the page in step 1 ----------
 # A broken copy of the app (tests/negative/mutate.js "crash-page") runs out of memory on purpose right after
 # "tap to update". The run MUST fail step 1, with no retry and no warning. If it passes or retries, this job fails.
-neg_port="${NEG_PORT:-8932}"; neg_out="${out}-neg-crash"; mkdir -p "$neg_out"
+neg_port="${NEG_PORT:-8932}"; neg_out="$out"; mkdir -p "$neg_out"
 if [[ "$neg_port" == "8765" ]]; then echo "::error::Port 8765 is not allowed for this project."; exit 2; fi
 neg_ok=0
 if [[ "$emu_gone" == 1 ]]; then
@@ -79,10 +97,7 @@ elif node tests/negative/mutate.js "${APP_DIR:-app}" /tmp/app-neg-crash crash-pa
     timeout 10m node tests/run-android.js > "$neg_out/run.log" 2>&1 || neg_status=$?
   cat "$neg_out/run.log"
   kill "$neg_server" 2>/dev/null || true
-  if [[ "$(timeout 10 adb get-state 2>/dev/null)" != "device" ]]; then
-    { echo "The emulator stopped responding during the negative check."; pgrep -fa 'qemu-system|emulator' | cut -c1-200 || echo "The emulator program is no longer running."
-      free -m; sudo -n dmesg -T 2>/dev/null | grep -iE 'oom|killed process|segfault|qemu|general protection|traps:' | tail -30; ls -la /tmp/android-runner 2>/dev/null; } 2>&1 | tee "$neg_out/emulator-gone.txt"
-  fi
+  if [[ "$(timeout 10 adb get-state 2>/dev/null)" != "device" ]]; then emu_gone_report "$neg_out/emulator-gone.txt"; fi
   timeout 60 adb logcat -d -b main,system,crash,events -v time > "$neg_out/logcat-full.txt" 2>&1 || true
   if node -e '
 const r = JSON.parse(require("fs").readFileSync(process.argv[1] + "/results.json", "utf8"));
@@ -107,8 +122,10 @@ else
   elif [[ -s "$neg_out/emulator-gone.txt" ]]; then echo "::error::NEGATIVE CHECK NOT SHOWN: the emulator stopped during the negative check, so the page crash was never seen (see $neg_out)."
   else echo "::error::NEGATIVE CHECK FAILED: a copy of the app that crashes the page did not fail step 1 cleanly (see $neg_out)."; fi
   [[ -n "${GITHUB_STEP_SUMMARY:-}" ]] && echo -e "\n❌ Negative check: the crashing copy of the app was not caught as a clean step-1 failure.\n" >> "$GITHUB_STEP_SUMMARY"
-  [[ "$status" == 0 ]] && status=1
+  status=1
 fi
+fi  # end of negative mode
 
+kill "$logcat_stream" 2>/dev/null || true
 timeout 30 adb reverse --remove-all || true
 exit "$status"
