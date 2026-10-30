@@ -180,6 +180,10 @@ decides which set runs. The older `TOUR` block at the top of that file matches t
 (`#modal .sheet.tour`: **Skip tour**, **‹ Back**, **Next ›**, **Done**), and the app's own tour setting
 (`window.__wa.tour.state`). If the tour's words or buttons change, update only that block.
 
+Waiting for the tour to open by itself allows 20 seconds from page load. If the browser driver itself reports an error
+during that wait (seen once in Linux WebKit), the wait goes on until the same 20-second deadline, the error text is
+shown in the check's details, and a visible warning is recorded if the tour then opens. The deadline is never extended.
+
 ## Breakage checks (proving the tests can fail)
 
 `ci/negative-checks.sh` makes broken copies of the app in a temporary folder and runs the Chromium checklist against

@@ -155,14 +155,33 @@ const stepInfo = page => page.evaluate(() => { const m = document.querySelector(
   return { key: b && b.getAttribute('data-step'), ind: ((m.querySelector('#tourStep') || {}).textContent || '').trim(), back: !!bk && !bk.hidden, next: nx ? nx.textContent.trim() : '', skip: !!sk && !sk.hidden && sk.textContent.trim() === 'Skip tour',
     focus: document.activeElement && document.activeElement.id }; });
 const tapTour = async (page, which) => { await page.locator(TOUR_SEL + ' [data-tour=' + which + ']').click(); await page.waitForTimeout(400); };
-const waitAutoTour = (page, ms) => page.waitForSelector(TOUR_SEL, { timeout: ms || 15000 }).then(() => true, () => false);
+// Waits for the tour to be on screen. If the browser driver itself reports an error during the wait (not a timeout,
+// e.g. a WebKit "context destroyed" hiccup), the wait goes on until the same deadline; the error is kept in
+// waitAutoTour.errors so the check can show it (and a visible warning is recorded when the tour then opens).
+// The deadline is never extended: the tour must still open by itself within ms.
+async function waitAutoTour(page, ms){
+  const end = Date.now() + (ms || 15000); waitAutoTour.errors = [];
+  while (Date.now() < end){
+    try { await page.waitForSelector(TOUR_SEL, { timeout: Math.max(1, end - Date.now()) }); return true; }
+    catch (e){ const m = String(e && e.message || e).split('\n')[0];
+      if ((e && e.name === 'TimeoutError') || /Timeout .*exceeded/.test(m) || page.isClosed()) return false;
+      waitAutoTour.errors.push(m.slice(0, 200)); await new Promise(r => setTimeout(r, 250)); }
+  }
+  return false;
+}
+waitAutoTour.errors = [];
+function waitErrNote(rec, S, opened, where){
+  const e = waitAutoTour.errors; if (!e.length) return '';
+  if (opened) rec.warn(S, 'while waiting for the tour to open by itself (' + where + '), the browser driver reported an error; the wait went on (same deadline) and the tour then opened', e.join(' | '));
+  return ' [driver errors while waiting: ' + e.join(' | ') + ']';
+}
 async function noTourAfterReload(page){ await page.reload(); await page.waitForSelector('#app .row, #app .empty', { timeout: 20000 }); await page.waitForTimeout(2500); return !(await tourOpen(page)); }
 async function tour121Checks(env, rec, version){
   const S = 'Tour (0.12.1+)', H = require('./helpers');
   // A. A brand-new copy: the tour opens by itself; walk it to Done; it never opens by itself again; Help > Take the tour replays it.
   let { page, done } = await openFresh(env);
-  let opened = await waitAutoTour(page, 20000), t = await tourState(page), s = await stepInfo(page);
-  rec.check(S, 'a brand-new copy: the tour opens by itself on the main screen at "Step 1 of N" (state "offer", opened by itself)', opened && !!s && /^Step 1 of \d+$/.test(s.ind) && !!t && t.state === 'offer' && t.auto === true && await page.evaluate(() => location.hash === '#/' || location.hash === '' || location.hash === '#'), JSON.stringify(t) + ' ' + (s && s.ind));
+  let opened = await waitAutoTour(page, 20000), werr = waitErrNote(rec, S, opened, 'brand-new copy'), t = await tourState(page), s = await stepInfo(page);
+  rec.check(S, 'a brand-new copy: the tour opens by itself on the main screen at "Step 1 of N" (state "offer", opened by itself)', opened && !!s && /^Step 1 of \d+$/.test(s.ind) && !!t && t.state === 'offer' && t.auto === true && await page.evaluate(() => location.hash === '#/' || location.hash === '' || location.hash === '#'), JSON.stringify(t) + ' ' + (s && s.ind) + werr);
   if (opened) await rec.shot(page, 'tour-auto-step-1');
   rec.check(S, '... there is no "New here?" card, no Start button, and no Take the tour on the main screen', await page.evaluate(() => !document.getElementById('tourCard') && !document.getElementById('tourLink') && !/New here\?|Take the tour|Start the tour/.test((document.getElementById('app') || {}).textContent || '')) && !(await page.getByRole('button', { name: /^Start the tour$/ }).count()));
   rec.check(S, '... focus is on the tour title, not a text box (no keyboard pops up)', !!s && s.focus === 'tourTitle');
@@ -183,8 +202,8 @@ async function tour121Checks(env, rec, version){
       const first = [...main.children].find(e => e.offsetHeight > 0 && !/^H[12]$/.test(e.tagName)); return { tag: b.tagName, text: b.textContent.trim(), h: r.height, top: r.top, bottom: r.bottom, vh: innerHeight, first: first === b }; });
     rec.check(S, 'Help starts with a "🧭 Take the tour" button, at least 44 px tall, on screen without scrolling', !!hb && hb.tag === 'BUTTON' && hb.text === '🧭 Take the tour' && hb.h >= 44 && hb.top >= 0 && hb.bottom <= hb.vh && hb.first, JSON.stringify(hb));
     if (hb){
-      await page.locator('#tourHelp').click(); const re = await waitAutoTour(page, 8000); const s1 = await stepInfo(page);
-      rec.check(S, 'Help > Take the tour opens the tour again at step 1', re && !!s1 && s1.ind === 'Step 1 of ' + n, s1 && s1.ind);
+      await page.locator('#tourHelp').click(); const re = await waitAutoTour(page, 8000), rerr = waitErrNote(rec, S, re, 'Help > Take the tour'); const s1 = await stepInfo(page);
+      rec.check(S, 'Help > Take the tour opens the tour again at step 1', re && !!s1 && s1.ind === 'Step 1 of ' + n, (s1 && s1.ind) + rerr);
       if (re){ await tapTour(page, 'skip'); await page.waitForTimeout(400); }
       t = await tourState(page);
       rec.check(S, '... skipping that replay keeps the earlier answer (done/finished) and focus goes back to Help\'s Take the tour button', re && !(await tourOpen(page)) && t.state === 'done' && t.how === 'finished' && await page.evaluate(() => document.activeElement && document.activeElement.id === 'tourHelp'), JSON.stringify(t));
@@ -193,8 +212,8 @@ async function tour121Checks(env, rec, version){
   await done();
   // B. Skip tour on the tour that opened by itself; then the new main-screen layout.
   ({ page, done } = await openFresh(env));
-  opened = await waitAutoTour(page, 20000); before = await notesSnap(page);
-  if (!opened) rec.check(S, 'Skip tour (second brand-new copy): the tour opened by itself', false, JSON.stringify(await tourState(page)));
+  opened = await waitAutoTour(page, 20000); werr = waitErrNote(rec, S, opened, 'second brand-new copy'); before = await notesSnap(page);
+  if (!opened) rec.check(S, 'Skip tour (second brand-new copy): the tour opened by itself', false, JSON.stringify(await tourState(page)) + werr);
   else {
     await H.clearToasts(page); await tapTour(page, 'skip'); t = await tourState(page);
     rec.check(S, 'Skip tour: it closes and the state is done/skipped', !(await tourOpen(page)) && t.state === 'done' && t.how === 'skipped', JSON.stringify(t));
@@ -216,8 +235,8 @@ async function tour121Checks(env, rec, version){
   await done();
   // C. The phone's Back on step 2 of the tour that opened by itself.
   ({ page, done } = await openFresh(env));
-  opened = await waitAutoTour(page, 20000); before = await notesSnap(page);
-  if (!opened) rec.check(S, 'phone Back (third brand-new copy): the tour opened by itself', false, JSON.stringify(await tourState(page)));
+  opened = await waitAutoTour(page, 20000); werr = waitErrNote(rec, S, opened, 'third brand-new copy'); before = await notesSnap(page);
+  if (!opened) rec.check(S, 'phone Back (third brand-new copy): the tour opened by itself', false, JSON.stringify(await tourState(page)) + werr);
   else {
     await tapTour(page, 'next'); const s2 = await stepInfo(page);
     await H.clearToasts(page); await env.back(page); await page.waitForTimeout(800); t = await tourState(page);
@@ -229,8 +248,8 @@ async function tour121Checks(env, rec, version){
   await done();
   // D. Escape (keyboard) on the tour that opened by itself.
   ({ page, done } = await openFresh(env));
-  opened = await waitAutoTour(page, 20000);
-  if (!opened) rec.check(S, 'Escape (fourth brand-new copy): the tour opened by itself', false, JSON.stringify(await tourState(page)));
+  opened = await waitAutoTour(page, 20000); werr = waitErrNote(rec, S, opened, 'fourth brand-new copy');
+  if (!opened) rec.check(S, 'Escape (fourth brand-new copy): the tour opened by itself', false, JSON.stringify(await tourState(page)) + werr);
   else {
     await H.clearToasts(page); await page.keyboard.press('Escape'); await page.waitForTimeout(500); t = await tourState(page);
     rec.check(S, 'Escape closes it as skipped (not finished)', !(await tourOpen(page)) && t.state === 'done' && t.how === 'skipped', JSON.stringify(t));
