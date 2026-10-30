@@ -47,6 +47,7 @@ if [[ "$(timeout 10 adb get-state 2>/dev/null)" != "device" ]]; then
     pgrep -fa 'qemu-system|emulator' | cut -c1-200 || echo "The emulator program is no longer running (it crashed or was stopped)."
     free -m
     sudo -n dmesg -T 2>/dev/null | grep -iE 'oom|killed process|segfault|qemu|general protection|traps:' | tail -30
+    ls -la /tmp/android-runner 2>/dev/null
   } 2>&1 | tee "$out/emulator-gone.txt"
   echo "::warning::The Android emulator stopped responding during the checks (see $out/emulator-gone.txt)."
 fi
@@ -78,14 +79,20 @@ elif node tests/negative/mutate.js "${APP_DIR:-app}" /tmp/app-neg-crash crash-pa
     timeout 10m node tests/run-android.js > "$neg_out/run.log" 2>&1 || neg_status=$?
   cat "$neg_out/run.log"
   kill "$neg_server" 2>/dev/null || true
+  if [[ "$(timeout 10 adb get-state 2>/dev/null)" != "device" ]]; then
+    { echo "The emulator stopped responding during the negative check."; pgrep -fa 'qemu-system|emulator' | cut -c1-200 || echo "The emulator program is no longer running."
+      free -m; sudo -n dmesg -T 2>/dev/null | grep -iE 'oom|killed process|segfault|qemu|general protection|traps:' | tail -30; ls -la /tmp/android-runner 2>/dev/null; } 2>&1 | tee "$neg_out/emulator-gone.txt"
+  fi
   timeout 60 adb logcat -d -b main,system,crash,events -v time > "$neg_out/logcat-full.txt" 2>&1 || true
   if node -e '
 const r = JSON.parse(require("fs").readFileSync(process.argv[1] + "/results.json", "utf8"));
 const fail1 = r.results.filter(x => x.step === "1" && x.status === "FAIL");
 const retried = r.warnings > 0 || r.results.some(x => / \(try 1\)$/.test(x.name));
-const crashNote = r.notes.find(n => /CRASHED|CLOSED/.test(n)) || "(no crash note)";
-console.log("Negative check: exit " + process.argv[2] + "; step-1 FAIL rows: " + fail1.length + " (" + fail1.map(x => x.name + ": " + x.detail).join(" | ").slice(0, 300) + "); warnings: " + r.warnings + "; retried: " + retried + "; " + crashNote);
-process.exit(process.argv[2] !== "0" && fail1.length > 0 && !retried ? 0 : 1);
+const crashNote = r.notes.find(n => /CRASHED|CLOSED/.test(n));
+// The failure must come from the page crash, not from the emulator or adb going away.
+const deviceTrouble = fail1.some(x => /androidDevice|Device is closed|device offline|no device/i.test(x.detail || ""));
+console.log("Negative check: exit " + process.argv[2] + "; step-1 FAIL rows: " + fail1.length + " (" + fail1.map(x => x.name + ": " + x.detail).join(" | ").slice(0, 300) + "); warnings: " + r.warnings + "; retried: " + retried + "; crash seen: " + (crashNote || "NO") + "; emulator/adb trouble: " + deviceTrouble);
+process.exit(process.argv[2] !== "0" && fail1.length > 0 && !retried && crashNote && !deviceTrouble ? 0 : 1);
 ' "$neg_out" "$neg_status" | tee "$neg_out/verdict.txt"; [[ "${PIPESTATUS[0]}" == 0 ]]; then
     neg_ok=1
   fi
@@ -97,6 +104,7 @@ if [[ "$neg_ok" == 1 ]]; then
   [[ -n "${GITHUB_STEP_SUMMARY:-}" ]] && echo -e "\n✅ Negative check: a copy of the app that crashes the page FAILS step 1 and is not retried.\n" >> "$GITHUB_STEP_SUMMARY"
 else
   if [[ "$emu_gone" == 1 ]]; then echo "::error::NEGATIVE CHECK NOT RUN: the emulator stopped before it could run."
+  elif [[ -s "$neg_out/emulator-gone.txt" ]]; then echo "::error::NEGATIVE CHECK NOT SHOWN: the emulator stopped during the negative check, so the page crash was never seen (see $neg_out)."
   else echo "::error::NEGATIVE CHECK FAILED: a copy of the app that crashes the page did not fail step 1 cleanly (see $neg_out)."; fi
   [[ -n "${GITHUB_STEP_SUMMARY:-}" ]] && echo -e "\n❌ Negative check: the crashing copy of the app was not caught as a clean step-1 failure.\n" >> "$GITHUB_STEP_SUMMARY"
   [[ "$status" == 0 ]] && status=1

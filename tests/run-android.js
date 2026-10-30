@@ -57,6 +57,11 @@ const reverseOff = () => { try { adb('reverse', '--remove', 'tcp:' + PORT); } ca
       // A fresh, empty Chrome profile: wipes only the emulator's Chrome data (made-up test data only).
       // Test setup only: 120 s limits on "pm clear" and starting Chrome, and how long each took goes in the log.
       const tf = Date.now(); freshN++;
+      // Emulator setup only: stop Chrome and wait (up to 15 s) until its processes are gone before wiping its data.
+      // In 4 of 7 Android tries the emulator itself died on a "pm clear" issued right after Chrome was closed.
+      await withLimit(device.shell('am force-stop ' + CHROME), 120000, 'stopping Chrome (fresh profile ' + freshN + ')');
+      for (let i = 0; i < 30; i++) { const p = String(await device.shell('pidof ' + CHROME + ' || true')).trim(); if (!p) break; await new Promise(r => setTimeout(r, 500)); }
+      await new Promise(r => setTimeout(r, 1000));
       await withLimit(device.shell('pm clear ' + CHROME), 120000, 'pm clear (fresh profile ' + freshN + ')');
       const tClear = Date.now() - tf;
       // Emulator setup only: allow Chrome's notifications up front so Chrome's own "Chrome notifications make

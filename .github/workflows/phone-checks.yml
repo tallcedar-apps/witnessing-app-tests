@@ -157,6 +157,7 @@ jobs:
           heap-size: 576M
           # -feature -Vulkan: in 3 of 6 Android tries (runs 2 and 5, twice) the emulator program died while Chrome was being closed (last line: a
           # Vulkan device being set up, with no matching "Destroyed VkDevice"). Chrome then draws with OpenGL ES instead.
+          # (Run 6, with Vulkan off, still lost the emulator once, during the negative check; so this is not proven to help.)
           emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none -no-snapshot -feature -Vulkan
           script: bash ci/android-checks.sh
       - name: Fallback — Chrome was missing, so retry on the google_apis_playstore image
@@ -178,6 +179,7 @@ jobs:
           heap-size: 576M
           # -feature -Vulkan: in 3 of 6 Android tries (runs 2 and 5, twice) the emulator program died while Chrome was being closed (last line: a
           # Vulkan device being set up, with no matching "Destroyed VkDevice"). Chrome then draws with OpenGL ES instead.
+          # (Run 6, with Vulkan off, still lost the emulator once, during the negative check; so this is not proven to help.)
           emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none -no-snapshot -feature -Vulkan
           script: bash ci/android-checks.sh
       - name: Result of the Android checks
