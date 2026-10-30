@@ -46,6 +46,7 @@ jobs:
     timeout-minutes: 20
     steps:
       - name: Check the inputs
+        id: inputs
         # Typed-in inputs reach scripts only through env. Reject anything that isn't a plain ref or version number.
         run: |
           [[ "$APP_REF" =~ ^[A-Za-z0-9._/-]{1,100}$ && "$APP_REF" != -* && "$APP_REF" != *..* ]] || { echo "::error::Bad app_ref (letters, digits, . _ / - only, up to 100)"; exit 1; }
@@ -84,7 +85,7 @@ jobs:
           OUT: results/chromium
         run: node tests/run-browser.js
       - name: Checklist in WebKit (iPhone size; WebKit, not real Safari)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.ver.outcome == 'success' }}
         env:
           ENGINE: webkit
           EXPECTED_VERSION: ${{ steps.ver.outputs.version }}
@@ -106,6 +107,7 @@ jobs:
     timeout-minutes: 55  # room for the Play Store fallback after a slow first boot
     steps:
       - name: Check the inputs
+        id: inputs
         # Typed-in inputs reach scripts only through env. Reject anything that isn't a plain ref or version number.
         run: |
           [[ "$APP_REF" =~ ^[A-Za-z0-9._/-]{1,100}$ && "$APP_REF" != -* && "$APP_REF" != *..* ]] || { echo "::error::Bad app_ref (letters, digits, . _ / - only, up to 100)"; exit 1; }
@@ -216,7 +218,8 @@ jobs:
           emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none -no-snapshot -feature -Vulkan
           script: bash ci/android-checks.sh
       - name: Result of the Android checks
-        if: ${{ !cancelled() }}
+        # Not when the inputs were refused (nothing ran, so there is nothing to report beyond that error).
+        if: ${{ !cancelled() && steps.inputs.outcome == 'success' }}
         env:
           EMU: ${{ steps.emu.outcome }}
           FALLBACK: ${{ steps.emu_playstore.outcome }}
@@ -261,6 +264,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Check the inputs
+        id: inputs
         # Typed-in inputs reach scripts only through env. Reject anything that isn't a plain ref or version number.
         run: |
           [[ "$APP_REF" =~ ^[A-Za-z0-9._/-]{1,100}$ && "$APP_REF" != -* && "$APP_REF" != *..* ]] || { echo "::error::Bad app_ref (letters, digits, . _ / - only, up to 100)"; exit 1; }
@@ -342,6 +346,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Check the inputs
+        id: inputs
         # Typed-in inputs reach scripts only through env. Reject anything that isn't a plain ref or version number.
         run: |
           [[ "$APP_REF" =~ ^[A-Za-z0-9._/-]{1,100}$ && "$APP_REF" != -* && "$APP_REF" != *..* ]] || { echo "::error::Bad app_ref (letters, digits, . _ / - only, up to 100)"; exit 1; }
@@ -382,12 +387,12 @@ jobs:
       # Test setup only: the Simulator now boots AFTER the WebKit checklist, not during it. In run 41003637168 the
       # WebKit step-1 tap timed out while the Simulator was booting on the same machine (cause not proven).
       - name: Boot an iPhone in the iOS Simulator (after the WebKit checks, so they don't share the machine with a boot)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.ver.outcome == 'success' }}
         continue-on-error: true   # screenshots only; the open step below warns if Safari can't be reached
         run: bash ci/ios-simulator.sh boot
       - name: Open in the iPhone simulator's Safari (screenshots only, not checked)
         id: simopen
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.ver.outcome == 'success' }}
         continue-on-error: true   # screenshots only; a failure here shows as a warning below, not a failed job
         timeout-minutes: 8   # includes waiting for the boot to finish
         run: bash ci/ios-simulator.sh open
@@ -396,7 +401,7 @@ jobs:
         run: echo "::warning::Could not open the app in the iPhone Simulator's Safari (screenshots only; does not affect pass/fail). Real-Safari screenshots are missing from this run."
       - name: Experimental, does not affect pass/fail — drive real Mobile Safari with safaridriver
         id: safari
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.ver.outcome == 'success' }}
         continue-on-error: true
         timeout-minutes: 6
         env:
@@ -413,7 +418,7 @@ jobs:
         if: ${{ always() && steps.safari.outcome == 'failure' }}
         run: echo "::warning::Experimental real-Safari check failed (does not affect pass/fail). See results/ios-safari and results/safaridriver.log."
       - name: Shut down the Simulator
-        if: always()
+        if: ${{ always() && steps.inputs.outcome == 'success' }}
         run: bash ci/ios-simulator.sh shutdown
       - name: Save screenshots and test files
         if: always()
@@ -430,6 +435,7 @@ jobs:
     timeout-minutes: 12
     steps:
       - name: Check the inputs
+        id: inputs
         # Typed-in inputs reach scripts only through env. Reject anything that isn't a plain ref or version number.
         run: |
           [[ "$APP_REF" =~ ^[A-Za-z0-9._/-]{1,100}$ && "$APP_REF" != -* && "$APP_REF" != *..* ]] || { echo "::error::Bad app_ref (letters, digits, . _ / - only, up to 100)"; exit 1; }
