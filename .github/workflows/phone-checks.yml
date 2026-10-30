@@ -135,6 +135,12 @@ jobs:
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
+          sudo udevadm settle --timeout=30 || true
+          # Check that KVM is really usable before starting the emulator. (In run 41005227489 this job's copy of the
+          # step was missing its last two lines, so the negative-check emulator ran without KVM: a 13-minute boot and
+          # a Chrome start that timed out.)
+          ls -l /dev/kvm || true
+          if [[ -r /dev/kvm && -w /dev/kvm ]]; then echo "KVM hardware speed-up is ready."; else echo "::error::KVM hardware speed-up is not usable on this runner, so the emulator would be far too slow to test with."; exit 1; fi
       # System image: google_apis (API 34, x86_64) is expected to include Chrome. If it doesn't, android-checks.sh
       # exits 3 and writes results/android-chrome-missing.txt; the next step then retries once on
       # google_apis_playstore, which always includes Chrome. Any other failure fails the job as usual.
@@ -251,6 +257,14 @@ jobs:
       - name: Turn on hardware speed-up for the emulator (KVM)
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          sudo udevadm settle --timeout=30 || true
+          # Check that KVM is really usable before starting the emulator. (In run 41005227489 this job's copy of the
+          # step was missing its last two lines, so the negative-check emulator ran without KVM: a 13-minute boot and
+          # a Chrome start that timed out.)
+          ls -l /dev/kvm || true
+          if [[ -r /dev/kvm && -w /dev/kvm ]]; then echo "KVM hardware speed-up is ready."; else echo "::error::KVM hardware speed-up is not usable on this runner, so the emulator would be far too slow to test with."; exit 1; fi
       - name: Negative check in the Android emulator's Chrome (google_apis image)
         uses: ReactiveCircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2.38.0
         env:
